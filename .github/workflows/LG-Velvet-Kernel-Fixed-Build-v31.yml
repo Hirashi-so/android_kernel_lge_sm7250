@@ -1,4 +1,4 @@
-name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v32
+name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v33
 
 on:
   workflow_dispatch:
@@ -1427,209 +1427,147 @@ jobs:
           set -euo pipefail
           LOG="$DIAG_DIR/17j-restore-common-lito-wsa.log"
           : > "$LOG"
-
+          
           {
             echo "=========================================="
-            echo "RESTORE COMMON LITO WSA INFRASTRUCTURE v8"
+            echo "RESTORE COMMON LITO WSA INFRASTRUCTURE v9"
             echo "=========================================="
-
+          
             LPI="arch/arm64/boot/dts/vendor/qcom/lito-lpi.dtsi"
             PINCTRL="arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi"
             AUDIO="arch/arm64/boot/dts/vendor/qcom/lito-audio-overlay.dtsi"
-
+          
             for f in "$LPI" "$PINCTRL" "$AUDIO"; do
               test -f "$f" || {
                 echo "MISSING: $f"
                 exit 1
               }
             done
-
+          
             cp "$LPI" "${LPI}.pre-17j.bak"
             cp "$PINCTRL" "${PINCTRL}.pre-17j.bak"
             cp "$AUDIO" "${AUDIO}.pre-17j.bak"
-
+          
             python3 - <<'PY'
           from pathlib import Path
           import re
-
+          
           LPI = Path("arch/arm64/boot/dts/vendor/qcom/lito-lpi.dtsi")
           PINCTRL = Path("arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi")
           AUDIO = Path("arch/arm64/boot/dts/vendor/qcom/lito-audio-overlay.dtsi")
-
-          def uncomment_single_wsa_block(text, start_label, end_label):
-              """Remove the Disable-WSA wrapper around one known existing block."""
-              start = text.find("/* Disable WSA speaker amp", text.find(start_label) - 1200)
-              if start < 0:
-                  if start_label in text and "/* Disable WSA speaker amp" not in text[text.find(start_label)-200:text.find(start_label)]:
-                      return text, False
-                  raise SystemExit(f"WSA wrapper not found for {start_label}")
-
-              label_pos = text.find(start_label, start)
-              if label_pos < 0:
-                  raise SystemExit(f"WSA label not found: {start_label}")
-
-              # Find the closing wrapper after the requested block.
-              end_pos = text.find("*/", text.find(end_label, label_pos))
-              if end_pos < 0:
-                  raise SystemExit(f"WSA closing wrapper not found for {start_label}")
-
-              # Only remove the wrapper if it actually encloses the label.
-              before = text[start:label_pos]
-              if "/* Disable WSA speaker amp" not in before:
-                  raise SystemExit(f"Unexpected WSA wrapper layout for {start_label}")
-
-              new = text[:start] + text[label_pos:end_pos] + text[end_pos+2:]
+          
+          def uncomment_wrapper_around(text, label, max_back=2500):
+              """Remove only a Disable-WSA C comment that actually encloses label."""
+              pos = text.find(label)
+              if pos < 0:
+                  return text, False
+          
+              window_start = max(0, pos - max_back)
+              before = text[window_start:pos]
+              open_pos = before.rfind("/* Disable WSA speaker amp")
+              close_pos = before.rfind("*/")
+          
+              if open_pos < 0 or close_pos > open_pos:
+                  return text, False
+          
+              open_abs = window_start + open_pos
+              close_abs = text.find("*/", pos)
+              if close_abs < 0:
+                  raise SystemExit(f"WSA wrapper is not closed for {label}")
+          
+              opening_end = open_abs + len("/* Disable WSA speaker amp")
+              while opening_end < len(text) and text[opening_end] in (chr(10), chr(13)):
+                  opening_end += 1
+          
+              new = text[:open_abs] + text[opening_end:close_abs] + text[close_abs + 2:]
               return new, True
-
-          def ensure_uncommented(path, start_label, end_label):
+          
+          def uncommented_text(text):
+              """Replace C/C++ comments with spaces so verification sees active labels only."""
+              out = list(text)
+              i = 0
+              n = len(text)
+              while i < n:
+                  if text.startswith("//", i):
+                      j = text.find(chr(10), i + 2)
+                      if j < 0:
+                          j = n
+                      for k in range(i, j):
+                          if out[k] != chr(10):
+                              out[k] = " "
+                      i = j
+                  elif text.startswith("/*", i):
+                      j = text.find("*/", i + 2)
+                      if j < 0:
+                          raise SystemExit("Unterminated C comment found during verification")
+                      j += 2
+                      for k in range(i, j):
+                          if out[k] != chr(10):
+                              out[k] = " "
+                      i = j
+                  else:
+                      i += 1
+              return "".join(out)
+          
+          def ensure_active(path, labels):
               text = path.read_text()
-
-              # If already active, leave it alone.
-              if start_label in text:
-                  p = text.find(start_label)
-                  if "/* Disable WSA speaker amp" not in text[max(0, p-1200):p]:
-                      return text, False
-
-              text, changed = uncomment_single_wsa_block(
-                  text, start_label, end_label
-              )
-              return text, changed
-
-          # --------------------------------------------------------
-          # 1) WSA SoundWire pin states: GPIO10 / GPIO11
-          # --------------------------------------------------------
-          lpi = LPI.read_text()
-          if "wsa_swr_clk_active: wsa_swr_clk_active" not in lpi:
-              lpi, changed = ensure_uncommented(
-                  LPI,
-                  "wsa_swr_clk_pin {",
-                  "wsa_swr_data_active: wsa_swr_data_active",
-              )
-              if not changed:
-                  raise SystemExit("Could not restore WSA SWR pin states")
-          LPI.write_text(lpi)
-
-          # --------------------------------------------------------
-          # 2) WSA speaker reset pin states: GPIO58 / GPIO65
-          # --------------------------------------------------------
-          pin = PINCTRL.read_text()
-          if "spkr_1_sd_n_active: spkr_1_sd_n_active" not in pin:
-              pin, changed = ensure_uncommented(
-                  PINCTRL,
-                  "spkr_1_sd_n {",
-                  "spkr_2_sd_n_active: spkr_2_sd_n_active",
-              )
-              if not changed:
-                  raise SystemExit("Could not restore WSA speaker GPIO states")
-          PINCTRL.write_text(pin)
-
-          # --------------------------------------------------------
-          # 3) Common audio overlay:
-          #    a) WSA macro/master
-          #    b) q6core wsa_swr_gpios
-          #    c) soc wsa_spkr_en1/en2
-          # --------------------------------------------------------
+              for label in labels:
+                  text, _ = uncomment_wrapper_around(text, label)
+              path.write_text(text)
+          
+          ensure_active(LPI, [
+              "wsa_swr_clk_active: wsa_swr_clk_active",
+              "wsa_swr_data_active: wsa_swr_data_active",
+          ])
+          
+          ensure_active(PINCTRL, [
+              "spkr_1_sd_n_active: spkr_1_sd_n_active",
+              "spkr_2_sd_n_active: spkr_2_sd_n_active",
+          ])
+          
           audio = AUDIO.read_text()
-
-          # a) Restore the complete WSA macro block.
-          if "wsa_macro: wsa-macro@3240000" not in audio:
-              raise SystemExit("WSA macro block is missing from audio overlay")
-
-          wsa_macro_pos = audio.find("wsa_macro: wsa-macro@3240000")
-          if "/* Disable WSA speaker amp" in audio[max(0, wsa_macro_pos-1000):wsa_macro_pos]:
-              wrapper_start = audio.rfind(
-                  "/* Disable WSA speaker amp", 0, wsa_macro_pos
-              )
-              wrapper_end = audio.find(
-                  "*/",
-                  audio.find("va_macro: va-macro@3370000", wsa_macro_pos)
-              )
-              if wrapper_end < 0:
-                  raise SystemExit("WSA macro closing wrapper not found")
-              audio = (
-                  audio[:wrapper_start]
-                  + audio[audio.find("wsa_macro: wsa-macro@3240000", wrapper_start):wrapper_end]
-                  + audio[wrapper_end+2:]
-              )
-
-          # b) Restore q6core wsa_swr_gpios.
-          label = "wsa_swr_gpios: wsa_swr_clk_data_pinctrl"
-          pos = audio.find(label)
-          if pos < 0:
-              raise SystemExit("wsa_swr_gpios block missing from audio overlay")
-          if "/* Disable WSA speaker amp" in audio[max(0, pos-1000):pos]:
-              wrapper_start = audio.rfind("/* Disable WSA speaker amp", 0, pos)
-              wrapper_end = audio.find(
-                  "*/",
-                  audio.find("rx_swr_gpios: rx_swr_clk_data_pinctrl", pos)
-              )
-              if wrapper_end < 0:
-                  raise SystemExit("wsa_swr_gpios closing wrapper not found")
-              audio = (
-                  audio[:wrapper_start]
-                  + audio[audio.find(label, wrapper_start):wrapper_end]
-                  + audio[wrapper_end+2:]
-              )
-
-          # c) Restore soc speaker enable nodes.
-          label = "wsa_spkr_en1: wsa_spkr_en1_pinctrl"
-          pos = audio.find(label)
-          if pos < 0:
-              raise SystemExit("wsa_spkr_en1 block missing from audio overlay")
-          if "/* Disable WSA speaker amp" in audio[max(0, pos-1000):pos]:
-              wrapper_start = audio.rfind("/* Disable WSA speaker amp", 0, pos)
-              wrapper_end = audio.find(
-                  "*/",
-                  audio.find("wcd938x_rst_gpio:", pos)
-              )
-              if wrapper_end < 0:
-                  raise SystemExit("wsa_spkr_en1 closing wrapper not found")
-              audio = (
-                  audio[:wrapper_start]
-                  + audio[audio.find(label, wrapper_start):wrapper_end]
-                  + audio[wrapper_end+2:]
-              )
-
-          # The restored WSA macro requires the fourth macro.
+          audio_labels = [
+              "wsa_macro: wsa-macro@3240000",
+              "wsa_swr_gpios: wsa_swr_clk_data_pinctrl",
+              "wsa_spkr_en1: wsa_spkr_en1_pinctrl",
+              "wsa_spkr_en2: wsa_spkr_en2_pinctrl",
+          ]
+          for label in audio_labels:
+              if label not in audio:
+                  raise SystemExit(f"Required audio label is missing: {label}")
+          
+          # v32 guessed a closing label after the wrapper. That failed because the
+          # wrapper had already closed. v33 removes the wrapper that actually encloses
+          # each target label instead.
+          for label in audio_labels:
+              audio, _ = uncomment_wrapper_around(audio, label)
+          
+          audio = audio.replace("qcom,num-macros = <3>;", "qcom,num-macros = <4>;", 1)
+          
           audio = re.sub(
-              r'/\*.*?qcom,num-macros\s*=\s*<4>.*?\*/\s*\n\s*qcom,num-macros\s*=\s*<3>;',
-              "qcom,num-macros = <4>;",
+              r'/\*\s*qcom,wsa-max-devs\s*=\s*<2>;\s*Disble WSA Speaker amp\s*\*/\s*qcom,wsa-max-devs\s*=\s*<0>;',
+              'qcom,wsa-max-devs = <2>;',
               audio,
               count=1,
               flags=re.S,
           )
-
-          # The restored speaker devices must be exposed to the sound card.
-          audio = audio.replace(
-              '/*\tqcom,wsa-max-devs = <2>; Disble WSA Speaker amp*/\n'
-              '\tqcom,wsa-max-devs = <0>;',
-              '\tqcom,wsa-max-devs = <2>;',
-              1,
+          audio = re.sub(
+              r'/\*\s*qcom,wsa-devs\s*=\s*<&wsa881x_0211>,\s*<&wsa881x_0212>,\s*<&wsa881x_0213>,\s*<&wsa881x_0214>;\s*\*/',
+              'qcom,wsa-devs = <&wsa881x_0211>, <&wsa881x_0212>, <&wsa881x_0213>, <&wsa881x_0214>;',
+              audio,
+              count=1,
+              flags=re.S,
           )
-          audio = audio.replace(
-              '/*\tqcom,wsa-devs = <&wsa881x_0211>, <&wsa881x_0212>,\n'
-              '\t\t\t<&wsa881x_0213>, <&wsa881x_0214>;*/',
-              '\tqcom,wsa-devs = <&wsa881x_0211>, <&wsa881x_0212>,\n'
-              '\t\t\t<&wsa881x_0213>, <&wsa881x_0214>;',
-              1,
-          )
-
           AUDIO.write_text(audio)
-
-          # --------------------------------------------------------
-          # Verification: exactly one active definition for every
-          # required label and no remaining WSA-disable wrapper
-          # around these labels.
-          # --------------------------------------------------------
-          print("\nRequired active labels:")
-          required = [
+          
+          checks = [
               ("LPI", LPI, [
                   "wsa_swr_clk_active:", "wsa_swr_clk_sleep:",
-                  "wsa_swr_data_active:", "wsa_swr_data_sleep:"
+                  "wsa_swr_data_active:", "wsa_swr_data_sleep:",
               ]),
               ("PINCTRL", PINCTRL, [
                   "spkr_1_sd_n_active:", "spkr_1_sd_n_sleep:",
-                  "spkr_2_sd_n_active:", "spkr_2_sd_n_sleep:"
+                  "spkr_2_sd_n_active:", "spkr_2_sd_n_sleep:",
               ]),
               ("AUDIO", AUDIO, [
                   "wsa_macro: wsa-macro@3240000",
@@ -1637,40 +1575,42 @@ jobs:
                   "wsa_spkr_en1: wsa_spkr_en1_pinctrl",
                   "wsa_spkr_en2: wsa_spkr_en2_pinctrl",
                   "wsa881x_0211:", "wsa881x_0212:",
-                  "wsa881x_0213:", "wsa881x_0214:"
+                  "wsa881x_0213:", "wsa881x_0214:",
               ]),
           ]
-
-          for name, path, labels in required:
-              data = path.read_text()
+          
+          for name, path, labels in checks:
+              active = uncommented_text(path.read_text())
+              print(f"\n{name}:")
               for label in labels:
-                  count = data.count(label)
-                  print(f"{name}: {label} = {count}")
+                  count = active.count(label)
+                  print(f"  {label} = {count}")
                   if count != 1:
                       raise SystemExit(f"Expected exactly one active definition: {label}")
-
-          if "qcom,num-macros = <3>;" in AUDIO.read_text():
+          
+          active_audio = uncommented_text(AUDIO.read_text())
+          if "qcom,num-macros = <3>;" in active_audio:
               raise SystemExit("WSA audio overlay still has num-macros=<3>")
-          if "qcom,wsa-max-devs = <0>;" in AUDIO.read_text():
+          if "qcom,wsa-max-devs = <0>;" in active_audio:
               raise SystemExit("WSA sound card still has wsa-max-devs=<0>")
-
+          
           print("\n17J source restoration: PASS")
           PY
-
+          
             echo
             echo "=========================================="
             echo "LITO-CDP DTC PREFLIGHT"
             echo "=========================================="
-
+          
             export ARCH=arm64
             export PATH="$(pwd)/toolchain/bin:$(pwd)/gcc64/bin:$(pwd)/gcc32/bin:${PATH}"
             export LLVM=1
             export LLVM_IAS=1
             export CROSS_COMPILE="$(pwd)/gcc64/bin/aarch64-linux-android-"
             export CROSS_COMPILE_ARM32="$(pwd)/gcc32/bin/arm-linux-androideabi-"
-
+          
             rm -f arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb
-
+          
             set +e
             make \
               ARCH=arm64 \
@@ -1683,18 +1623,18 @@ jobs:
               2>&1 | tee "$DIAG_DIR/17j-lito-cdp-dtc-preflight.log"
             STATUS=${PIPESTATUS[0]}
             set -e
-
+          
             if [ "$STATUS" -ne 0 ] || [ ! -s arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb ]; then
               echo
               echo "17J RESULT: FAIL"
               exit 1
             fi
-
+          
             echo
             echo "17J RESULT: PASS"
-
+          
           } >"$LOG" 2>&1
-
+          
           cat "$LOG"
 
       # 17K. LITOMAGNUS DT REGISTRATION AUDIT (DIAGNOSTIC ONLY)
