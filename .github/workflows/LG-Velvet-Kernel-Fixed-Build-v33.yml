@@ -1,4 +1,4 @@
-name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v35
+name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v36
 
 on:
   workflow_dispatch:
@@ -1688,51 +1688,101 @@ jobs:
 
           START=$(date +%s)
 
+          # ==========================================================
+          # v36 BUILD STABILITY FIX
+          #
+          # v35 used -j$(nproc). This old 4.19 tree is large and has
+          # legacy Kbuild dependency paths. Use controlled parallelism
+          # first, then retry the exact same source/config with -j1 if
+          # the first pass fails. No earlier fix is changed here.
+          # ==========================================================
+          JOBS=2
+          RETRY_ATTEMPTED=0
+          echo "BUILD_JOBS_FIRST_PASS=$JOBS"
+          echo "HOST_CPUS=$(nproc)"
+          echo "AVAILABLE_MEMORY:"
+          free -h || true
+
+          echo
+          echo "===== KERNEL BUILD PASS 1 (controlled parallelism) ====="
           make \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            -j"$(nproc)" \
+            -j"$JOBS" \
             V=1 \
             WERROR=0 \
             >"$FULL_LOG" 2>&1
 
           BUILD_STATUS=$?
 
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            RETRY_ATTEMPTED=1
+            echo
+            echo "===== PASS 1 FAILED (exit $BUILD_STATUS) ====="
+            echo "Retrying the SAME kernel build with -j1."
+            echo "No source, defconfig, KernelSU, BBG, camera, display, or DT changes are made."
+
+            RETRY_LOG="$DIAG_DIR/19-build-retry-j1.log"
+            : > "$RETRY_LOG"
+
+            make \
+              ARCH=arm64 \
+              LLVM=1 \
+              LLVM_IAS=1 \
+              CROSS_COMPILE="$CROSS_COMPILE" \
+              CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              -j1 \
+              V=1 \
+              WERROR=0 \
+              >"$RETRY_LOG" 2>&1
+
+            RETRY_STATUS=$?
+
+            echo "===== RETRY RESULT: exit $RETRY_STATUS ====="
+            cat "$RETRY_LOG" >> "$FULL_LOG"
+            BUILD_STATUS=$RETRY_STATUS
+          fi
+
           END=$(date +%s)
           ELAPSED=$((END-START))
 
-          {
+          { 
             echo "BUILD_STATUS=$BUILD_STATUS"
             echo "BUILD_TIME_SECONDS=$ELAPSED"
             echo "BUILD_TIME_HUMAN=$((ELAPSED/60))m $((ELAPSED%60))s"
+            echo "BUILD_JOBS_FIRST_PASS=$JOBS"
+            echo "BUILD_RETRY_J1=$([ "$RETRY_ATTEMPTED" -eq 1 ] && echo attempted || echo not-needed)"
             echo "BUILD_LOG_BYTES=$(wc -c < "$FULL_LOG")"
             echo "BUILD_LOG_LINES=$(wc -l < "$FULL_LOG")"
           } | tee "$SUMMARY_LOG"
 
+          # Search the COMPLETE log, not only its tail. The real failing
+          # object can appear hundreds of lines before built-in.a cleanup.
           grep -nEi \
-            'fatal error:|error:|undefined reference|undeclared|implicit declaration|invalid|unknown argument|unknown warning|No such file|No rule to make target|recipe for target|Error [0-9]+|make\[[0-9]+\]: \*\*\*' \
+            'fatal error:|error:|undefined reference|undeclared|implicit declaration|incompatible|invalid|unknown argument|unknown warning|No such file|No rule to make target|recipe for target|Error [0-9]+|make\[[0-9]+\]: \*\*\*|clang: error:|ld\.lld: error:|ar: error:|ranlib: error:|Killed|Out of memory|No space left on device' \
             "$FULL_LOG" \
             | tail -250 >"$ERROR_LOG" || true
 
-          tail -300 "$FULL_LOG" >"$TAIL_LOG" || true
+          tail -400 "$FULL_LOG" >"$TAIL_LOG" || true
 
           echo
           echo "===== COMPACT BUILD ERROR SUMMARY ====="
           if [ -s "$ERROR_LOG" ]; then
-            echo "Full compiler-error list is in artifact: ci-logs/19-build-errors.log"
-            echo "Showing only the final 20 matching lines here to avoid GitHub log truncation:"
-            tail -20 "$ERROR_LOG" || true
+            echo "Full error list is in artifact: ci-logs/19-build-errors.log"
+            echo "Showing the final 30 matching lines:"
+            tail -30 "$ERROR_LOG" || true
           else
-            echo "No compiler-error pattern found."
+            echo "No known compiler/linker error pattern found in the complete build log."
+            echo "The complete log remains available as kernel-build-full.log."
           fi
 
           echo
-          echo "===== LAST 40 BUILD LINES ====="
+          echo "===== LAST 60 BUILD LINES ====="
           echo "Full build tail is in artifact: ci-logs/19-build-tail.log"
-          tail -40 "$FULL_LOG" || true
+          tail -60 "$FULL_LOG" || true
 
           if [ "$BUILD_STATUS" -eq 0 ]; then
             test -s arch/arm64/boot/Image
