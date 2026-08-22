@@ -543,6 +543,44 @@ jobs:
           grep -nF 'subdir-ccflags-y += -I$(src)' "$OIS_PARENT_MAKE"
 
           # ------------------------------------------------------------
+          # 6) Stock LG display nested-header include path
+          #
+          # Current build reaches:
+          #   techpack/display/msm/lge/cm/lge_color_manager.c:19:10:
+          #   fatal error: 'lge_dsi_panel_def.h' file not found
+          #
+          # The stock header lives in the parent:
+          #   techpack/display/msm/lge/lge_dsi_panel_def.h
+          #
+          # The stock lge/Makefile supplies several display include paths,
+          # but not its own directory. Propagate ONLY the stock lge
+          # directory to its nested display objects.
+          #
+          # No header is downloaded/copied/replaced and no display feature
+          # is enabled or disabled.
+          # ------------------------------------------------------------
+          LGE_DISPLAY_DIR="techpack/display/msm/lge"
+          LGE_DISPLAY_MAKE="$LGE_DISPLAY_DIR/Makefile"
+          LGE_DISPLAY_HEADER="$LGE_DISPLAY_DIR/lge_dsi_panel_def.h"
+
+          test -d "$LGE_DISPLAY_DIR"
+          test -f "$LGE_DISPLAY_MAKE"
+          test -f "$LGE_DISPLAY_HEADER"
+
+          if ! grep -qF 'subdir-ccflags-y += -I$(src)' "$LGE_DISPLAY_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: stock LG display parent headers for nested objects"
+              echo 'subdir-ccflags-y += -I$(src)'
+            } >> "$LGE_DISPLAY_MAKE"
+          fi
+
+          echo "[PASS] Stock LG display header exists:"
+          ls -lh "$LGE_DISPLAY_HEADER"
+          echo "[PASS] LG display parent include path propagated to nested objects:"
+          grep -nF 'subdir-ccflags-y += -I$(src)' "$LGE_DISPLAY_MAKE"
+
+          # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
