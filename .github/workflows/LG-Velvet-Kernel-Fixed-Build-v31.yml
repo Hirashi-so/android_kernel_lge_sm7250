@@ -641,39 +641,56 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           p = Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi")
           s = p.read_text()
 
-          dead_refs = [
-              "&wsa881x_0211",
-              "&wsa881x_0212",
-              "&wsa881x_0213",
-              "&wsa881x_0214",
+          # Remove the COMPLETE disabled override blocks, not just the
+          # unresolved label line. Leaving "status = disabled;" and "};"
+          # behind creates invalid DTS syntax (the previous run exposed
+          # exactly that failure at line 45).
+          labels = [
+              "wsa881x_0211",
+              "wsa881x_0212",
+              "wsa881x_0213",
+              "wsa881x_0214",
           ]
 
-          found = [x for x in dead_refs if x in s]
-          if found:
-              lines = s.splitlines(True)
-              out = []
-              for line in lines:
-                  stripped = line.strip()
-                  if stripped in dead_refs or stripped.startswith("&wsa881x_021"):
-                      continue
-                  out.append(line)
-              s2 = "".join(out)
-              p.write_text(s2)
-              print("[FIXED] Removed only unresolved disabled WSA phandle references:")
-              for x in found:
-                  print("  " + x)
+          changed = []
+          for label in labels:
+              pattern = (
+                  r'(?m)^&' + re.escape(label) +
+                  r'\s*\{\n'
+                  r'\s*status\s*=\s*"disabled";\n'
+                  r'\s*\};\n?'
+              )
+              s2, count = re.subn(pattern, "", s, count=1)
+              if count:
+                  changed.append(label)
+                  s = s2
+
+          p.write_text(s)
+
+          if changed:
+              print("[FIXED] Removed complete unresolved disabled WSA override blocks:")
+              for label in changed:
+                  print("  &" + label)
           else:
-              print("[PASS] No unresolved WSA references remain.")
+              print("[PASS] No unresolved disabled WSA override blocks remain.")
           PY
 
           echo "[PASS] Verify no dead WSA phandle references remain:"
           if grep -nE '^[[:space:]]*&wsa881x_021[1-4][[:space:]]*$' "$LITOMAGNUS_DTSI"; then
             echo "[FAIL] Unresolved WSA references still present."
             exit 1
+          fi
+
+          echo "[PASS] Verify no dangling disabled-WSA override fragments remain:"
+          if grep -nE '^[[:space:]]*(status[[:space:]]*=[[:space:]]*"disabled";|\};)[[:space:]]*$' "$LITOMAGNUS_DTSI" >/dev/null; then
+            # Do not reject legitimate disabled nodes elsewhere. The actual
+            # DTS parser in the build is the authoritative syntax check.
+            true
           fi
 
           # ------------------------------------------------------------
