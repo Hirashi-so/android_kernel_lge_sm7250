@@ -256,8 +256,41 @@ jobs:
 
             patch -p1 --forward < 50_add_susfs_in_kernel.patch
 
-            echo
-            echo "========== SUSFS FILES INSTALLED =========="
+            # ============================================================
+            # SUSFS / LG 4.19 KABI COMPATIBILITY
+            #
+            # The stock LG kernel's struct user_struct does not expose
+            # android_kabi_reserved1/2, while the official SUSFS 4.19
+            # patch uses android_kabi_reserved1 for SUS_PATH accounting.
+            # Add the existing Android KABI reserve macros to this
+            # structure only; no other kernel feature is changed.
+            # ============================================================
+            python3 - <<'PY'
+          from pathlib import Path
+          
+          p = Path("include/linux/sched/user.h")
+          s = p.read_text()
+          
+          if "#include <linux/android_kabi.h>" not in s:
+              anchor = "#include <linux/ratelimit.h>"
+              if anchor not in s:
+                  raise SystemExit("Could not locate sched/user.h include anchor")
+              s = s.replace(anchor, anchor + "\n#include <linux/android_kabi.h>", 1)
+          
+          if "ANDROID_KABI_RESERVE(1);" not in s:
+              anchor = "\tstruct ratelimit_state ratelimit;\n"
+              if anchor not in s:
+                  raise SystemExit("Could not locate struct user_struct tail")
+              replacement = anchor + "\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n"
+              s = s.replace(anchor, replacement, 1)
+          
+          p.write_text(s)
+          print("[PASS] Added Android KABI reserve slots 1/2 to struct user_struct.")
+          PY
+
+            grep -nE 'android_kabi.h|ANDROID_KABI_RESERVE\((1|2)\)' \
+              include/linux/sched/user.h
+
             ls -lh fs/susfs.c fs/sus_su.c include/linux/susfs.h include/linux/sus_su.h
             echo
             echo "========== SUSFS PATCH STATUS =========="
@@ -338,6 +371,9 @@ jobs:
             test -f include/linux/susfs.h
             test -f include/linux/sus_su.h
             test -f 50_add_susfs_in_kernel.patch
+            grep -q '#include <linux/android_kabi.h>' include/linux/sched/user.h
+            grep -q 'ANDROID_KABI_RESERVE(1);' include/linux/sched/user.h
+            grep -q 'ANDROID_KABI_RESERVE(2);' include/linux/sched/user.h
             echo "KernelSU: present"
             echo "SUSFS kernel files: present"
             echo
@@ -377,6 +413,12 @@ jobs:
           export CROSS_COMPILE="$GCC64_DIR/bin/aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="$GCC32_DIR/bin/arm-linux-androideabi-"
 
+          # Qualcomm clock trace.h uses TRACE_INCLUDE_PATH "." and this
+          # source tree expects its local directory on the compiler include
+          # path. This is a build-environment fix only; source/behavior is
+          # otherwise unchanged.
+          export KCFLAGS="-Idrivers/clk/qcom${KCFLAGS:+ $KCFLAGS}"
+
           echo "=========================================="
           echo "STARTING STOCK + KERNELSU + SUSFS BUILD"
           echo "Full V=1 stdout/stderr -> kernel-build-full.log"
@@ -394,6 +436,7 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            KCFLAGS="$KCFLAGS" \
             -j"$(nproc)" \
             V=1 \
             WERROR=0 \
