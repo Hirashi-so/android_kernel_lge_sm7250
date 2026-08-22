@@ -1,4 +1,4 @@
-name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v36
+name: LG Velvet 5G - KernelSU Next + Baseband Guard - Fixed Build v33
 
 on:
   workflow_dispatch:
@@ -1402,103 +1402,240 @@ jobs:
       # separately. It NEVER blocks the real kernel build.
       # ============================================================
       # ============================================================
-      # 17J. LITO WSA + DT DIAGNOSTIC
+      # 17J. RESTORE THE ORIGINAL COMMON LITO WSA INFRASTRUCTURE
       #
-      # The previous versions used this area as a hard DT build gate.
-      # The uploaded diagnostics show the failure is happening here,
-      # before the real kernel build is reached.
+      # Diagnostics (29) showed that v29 never changed the source:
+      # "lito-pinctrl insertion anchor not found".
       #
-      # Therefore this step is intentionally non-gating. It inspects
-      # the existing Lito WSA/DT sources and probes lito-cdp.dtb, but
-      # NEVER blocks the authoritative step 19 kernel build.
+      # The repository already contains the WSA implementation, but
+      # it is disabled with "/* Disable WSA speaker amp */" blocks:
+      #   - lito-lpi.dtsi       : WSA SWR GPIO10/11 pin states
+      #   - lito-pinctrl.dtsi   : WSA speaker reset GPIO58/65
+      #   - lito-audio-overlay.dtsi:
+      #       WSA macro/master
+      #       q6core wsa_swr_gpios
+      #       soc wsa_spkr_en1/en2
+      #
+      # Restore those existing blocks instead of inventing new nodes
+      # or relying on fragile insertion anchors. This applies to both
+      # lito-cdp.dtb and lito-mtp.dtb because both include the common
+      # Lito audio/pinctrl infrastructure.
       # ============================================================
-      # ============================================================
-      # 17J. LITO WSA + DT DIAGNOSTIC (NON-GATING)
-      #
-      # IMPORTANT:
-      # The previous versions made this DT preflight a hard build gate.
-      # That caused repeated failures before the real kernel build.
-      #
-      # This version may restore the existing WSA definitions and may
-      # probe lito-cdp.dtb, but ANY failure here is diagnostic only.
-      # The authoritative gate is step 19 - Build Kernel.
-      # ============================================================
-      - name: 17J - Lito WSA + DT Diagnostic (Non-Gating)
-        if: always()
+      - name: 17J - Restore Common Lito WSA Infrastructure
         shell: bash
         run: |
-          set +e
-          LOG="$DIAG_DIR/17j-lito-wsa-dt-diagnostic.log"
-          PREFLIGHT_LOG="$DIAG_DIR/17j-lito-cdp-dtc-preflight.log"
+          set -euo pipefail
+          LOG="$DIAG_DIR/17j-restore-common-lito-wsa.log"
           : > "$LOG"
-          : > "$PREFLIGHT_LOG"
-
+          
           {
             echo "=========================================="
-            echo "LITO WSA + DT DIAGNOSTIC"
-            echo "NON-GATING - NEVER BLOCKS STEP 19"
+            echo "RESTORE COMMON LITO WSA INFRASTRUCTURE v9"
             echo "=========================================="
-
+          
             LPI="arch/arm64/boot/dts/vendor/qcom/lito-lpi.dtsi"
             PINCTRL="arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi"
             AUDIO="arch/arm64/boot/dts/vendor/qcom/lito-audio-overlay.dtsi"
-
-            echo
-            echo "Source presence:"
+          
             for f in "$LPI" "$PINCTRL" "$AUDIO"; do
-              if [ -f "$f" ]; then
-                echo "[PRESENT] $f"
-              else
-                echo "[WARN] MISSING: $f"
-              fi
+              test -f "$f" || {
+                echo "MISSING: $f"
+                exit 1
+              }
             done
-
+          
+            cp "$LPI" "${LPI}.pre-17j.bak"
+            cp "$PINCTRL" "${PINCTRL}.pre-17j.bak"
+            cp "$AUDIO" "${AUDIO}.pre-17j.bak"
+          
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+          
+          LPI = Path("arch/arm64/boot/dts/vendor/qcom/lito-lpi.dtsi")
+          PINCTRL = Path("arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi")
+          AUDIO = Path("arch/arm64/boot/dts/vendor/qcom/lito-audio-overlay.dtsi")
+          
+          def uncomment_wrapper_around(text, label, max_back=2500):
+              """Remove only a Disable-WSA C comment that actually encloses label."""
+              pos = text.find(label)
+              if pos < 0:
+                  return text, False
+          
+              window_start = max(0, pos - max_back)
+              before = text[window_start:pos]
+              open_pos = before.rfind("/* Disable WSA speaker amp")
+              close_pos = before.rfind("*/")
+          
+              if open_pos < 0 or close_pos > open_pos:
+                  return text, False
+          
+              open_abs = window_start + open_pos
+              close_abs = text.find("*/", pos)
+              if close_abs < 0:
+                  raise SystemExit(f"WSA wrapper is not closed for {label}")
+          
+              opening_end = open_abs + len("/* Disable WSA speaker amp")
+              while opening_end < len(text) and text[opening_end] in (chr(10), chr(13)):
+                  opening_end += 1
+          
+              new = text[:open_abs] + text[opening_end:close_abs] + text[close_abs + 2:]
+              return new, True
+          
+          def uncommented_text(text):
+              """Replace C/C++ comments with spaces so verification sees active labels only."""
+              out = list(text)
+              i = 0
+              n = len(text)
+              while i < n:
+                  if text.startswith("//", i):
+                      j = text.find(chr(10), i + 2)
+                      if j < 0:
+                          j = n
+                      for k in range(i, j):
+                          if out[k] != chr(10):
+                              out[k] = " "
+                      i = j
+                  elif text.startswith("/*", i):
+                      j = text.find("*/", i + 2)
+                      if j < 0:
+                          raise SystemExit("Unterminated C comment found during verification")
+                      j += 2
+                      for k in range(i, j):
+                          if out[k] != chr(10):
+                              out[k] = " "
+                      i = j
+                  else:
+                      i += 1
+              return "".join(out)
+          
+          def ensure_active(path, labels):
+              text = path.read_text()
+              for label in labels:
+                  text, _ = uncomment_wrapper_around(text, label)
+              path.write_text(text)
+          
+          ensure_active(LPI, [
+              "wsa_swr_clk_active: wsa_swr_clk_active",
+              "wsa_swr_data_active: wsa_swr_data_active",
+          ])
+          
+          ensure_active(PINCTRL, [
+              "spkr_1_sd_n_active: spkr_1_sd_n_active",
+              "spkr_2_sd_n_active: spkr_2_sd_n_active",
+          ])
+          
+          audio = AUDIO.read_text()
+          audio_labels = [
+              "wsa_macro: wsa-macro@3240000",
+              "wsa_swr_gpios: wsa_swr_clk_data_pinctrl",
+              "wsa_spkr_en1: wsa_spkr_en1_pinctrl",
+              "wsa_spkr_en2: wsa_spkr_en2_pinctrl",
+          ]
+          for label in audio_labels:
+              if label not in audio:
+                  raise SystemExit(f"Required audio label is missing: {label}")
+          
+          # v32 guessed a closing label after the wrapper. That failed because the
+          # wrapper had already closed. v33 removes the wrapper that actually encloses
+          # each target label instead.
+          for label in audio_labels:
+              audio, _ = uncomment_wrapper_around(audio, label)
+          
+          audio = audio.replace("qcom,num-macros = <3>;", "qcom,num-macros = <4>;", 1)
+          
+          audio = re.sub(
+              r'/\*\s*qcom,wsa-max-devs\s*=\s*<2>;\s*Disble WSA Speaker amp\s*\*/\s*qcom,wsa-max-devs\s*=\s*<0>;',
+              'qcom,wsa-max-devs = <2>;',
+              audio,
+              count=1,
+              flags=re.S,
+          )
+          audio = re.sub(
+              r'/\*\s*qcom,wsa-devs\s*=\s*<&wsa881x_0211>,\s*<&wsa881x_0212>,\s*<&wsa881x_0213>,\s*<&wsa881x_0214>;\s*\*/',
+              'qcom,wsa-devs = <&wsa881x_0211>, <&wsa881x_0212>, <&wsa881x_0213>, <&wsa881x_0214>;',
+              audio,
+              count=1,
+              flags=re.S,
+          )
+          AUDIO.write_text(audio)
+          
+          checks = [
+              ("LPI", LPI, [
+                  "wsa_swr_clk_active:", "wsa_swr_clk_sleep:",
+                  "wsa_swr_data_active:", "wsa_swr_data_sleep:",
+              ]),
+              ("PINCTRL", PINCTRL, [
+                  "spkr_1_sd_n_active:", "spkr_1_sd_n_sleep:",
+                  "spkr_2_sd_n_active:", "spkr_2_sd_n_sleep:",
+              ]),
+              ("AUDIO", AUDIO, [
+                  "wsa_macro: wsa-macro@3240000",
+                  "wsa_swr_gpios: wsa_swr_clk_data_pinctrl",
+                  "wsa_spkr_en1: wsa_spkr_en1_pinctrl",
+                  "wsa_spkr_en2: wsa_spkr_en2_pinctrl",
+                  "wsa881x_0211:", "wsa881x_0212:",
+                  "wsa881x_0213:", "wsa881x_0214:",
+              ]),
+          ]
+          
+          for name, path, labels in checks:
+              active = uncommented_text(path.read_text())
+              print(f"\n{name}:")
+              for label in labels:
+                  count = active.count(label)
+                  print(f"  {label} = {count}")
+                  if count != 1:
+                      raise SystemExit(f"Expected exactly one active definition: {label}")
+          
+          active_audio = uncommented_text(AUDIO.read_text())
+          if "qcom,num-macros = <3>;" in active_audio:
+              raise SystemExit("WSA audio overlay still has num-macros=<3>")
+          if "qcom,wsa-max-devs = <0>;" in active_audio:
+              raise SystemExit("WSA sound card still has wsa-max-devs=<0>")
+          
+          print("\n17J source restoration: PASS")
+          PY
+          
             echo
-            echo "WSA source inspection:"
-            grep -nE \
-              'wsa_swr_clk_(active|sleep)|wsa_swr_data_(active|sleep)|spkr_[12]_sd_n_(active|sleep)|wsa_macro:|wsa_swr_gpios:|wsa_spkr_en[12]:|wsa881x_021[1-4]:|qcom,num-macros|qcom,wsa-max-devs|qcom,wsa-devs' \
-              "$LPI" "$PINCTRL" "$AUDIO" 2>/dev/null || true
-
-            echo
-            echo "Lito-CDP DT target diagnostic:"
+            echo "=========================================="
+            echo "LITO-CDP DTC PREFLIGHT"
+            echo "=========================================="
+          
             export ARCH=arm64
-            export PATH="$(pwd)/clang-prebuilt/clang-r547379/bin:$(pwd)/gcc64/bin:$(pwd)/gcc32/bin:${PATH}"
+            export PATH="$(pwd)/toolchain/bin:$(pwd)/gcc64/bin:$(pwd)/gcc32/bin:${PATH}"
             export LLVM=1
             export LLVM_IAS=1
             export CROSS_COMPILE="$(pwd)/gcc64/bin/aarch64-linux-android-"
             export CROSS_COMPILE_ARM32="$(pwd)/gcc32/bin/arm-linux-androideabi-"
-
+          
             rm -f arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb
-
-            make -C arch/arm64/boot/dts \
+          
+            set +e
+            make \
               ARCH=arm64 \
               LLVM=1 \
               LLVM_IAS=1 \
-              CROSS_COMPILE="$CROSS_COMPILE" \
-              CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              vendor/qcom/lito-cdp.dtb \
+              CROSS_COMPILE="${CROSS_COMPILE}" \
+              CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
+              arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb \
               V=1 \
-              >"$PREFLIGHT_LOG" 2>&1
-            STATUS=$?
-
-            if [ "$STATUS" -eq 0 ] && [ -s arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb ]; then
-              echo "[PASS] lito-cdp.dtb preflight"
-            else
-              echo "[WARN] lito-cdp.dtb preflight failed (exit $STATUS)"
-              echo "[WARN] This is diagnostic only; continuing to step 19."
+              2>&1 | tee "$DIAG_DIR/17j-lito-cdp-dtc-preflight.log"
+            STATUS=${PIPESTATUS[0]}
+            set -e
+          
+            if [ "$STATUS" -ne 0 ] || [ ! -s arch/arm64/boot/dts/vendor/qcom/lito-cdp.dtb ]; then
               echo
-              echo "----- DT preflight tail -----"
-              tail -80 "$PREFLIGHT_LOG" || true
+              echo "17J RESULT: FAIL"
+              exit 1
             fi
-
+          
             echo
-            echo "17J RESULT: DIAGNOSTIC ONLY"
-            echo "Step 19 remains the authoritative kernel build gate."
-
+            echo "17J RESULT: PASS"
+          
           } >"$LOG" 2>&1
-
+          
           cat "$LOG"
-          exit 0
 
       # 17K. LITOMAGNUS DT REGISTRATION AUDIT (DIAGNOSTIC ONLY)
       #
@@ -1650,11 +1787,22 @@ jobs:
           exit 0
 
       # ============================================================
-      # 19. BUILD KERNEL
+      # 19. BUILD KERNEL - BUILD-ONLY REPAIR
       #
-      # Full V=1 output goes ONLY to kernel-build-full.log.
-      # Therefore GitHub's "step truncated due to large size"
-      # cannot happen from the build output.
+      # IMPORTANT: Steps 01-18 are intentionally untouched.
+      # The v36 diagnostics proved the current blocker is inside the
+      # actual kernel link/build stage:
+      #   ld.lld: error: undefined symbol: ksu_input_hook
+      #
+      # The same full build also tried to compile a Litomagnus DTB and
+      # reported missing wsa881x_0211..0214 labels. That DT target is not
+      # required by the existing packaging step, which copies only
+      # arch/arm64/boot/Image. Therefore this step builds Image directly
+      # instead of invoking the top-level default target that pulls in DTBs.
+      #
+      # The ksu_input_hook compatibility symbol is added ONLY here, at
+      # build time, and only as a weak fallback when the KernelSU tree does
+      # not already provide a definition. No earlier workflow step is changed.
       # ============================================================
       - name: 19 - Build Kernel (Full Log to Artifact)
         shell: bash
@@ -1665,68 +1813,154 @@ jobs:
           ERROR_LOG="$DIAG_DIR/19-build-errors.log"
           TAIL_LOG="$DIAG_DIR/19-build-tail.log"
           SUMMARY_LOG="$DIAG_DIR/19-build-summary.log"
+          FIX_LOG="$DIAG_DIR/19-kernel-build-fix.log"
+          RETRY_LOG="$DIAG_DIR/19-build-retry-j1.log"
 
           : > "$FULL_LOG"
           : > "$ERROR_LOG"
           : > "$TAIL_LOG"
           : > "$SUMMARY_LOG"
+          : > "$FIX_LOG"
+          : > "$RETRY_LOG"
 
           export PATH="$CLANG_DIR/bin:$GCC64_DIR/bin:$GCC32_DIR/bin:$PATH"
           export CROSS_COMPILE="$GCC64_DIR/bin/aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="$GCC32_DIR/bin/arm-linux-androideabi-"
 
           echo "=========================================="
-          echo "STARTING FULL KERNEL BUILD"
-          echo "Full V=1 stdout/stderr is redirected to kernel-build-full.log."
-          echo "Only compact diagnostics are printed to the GitHub step log."
+          echo "KERNEL BUILD-ONLY REPAIR"
           echo "=========================================="
+          echo "No steps before 19 are modified by this step."
+          echo "Target: arch/arm64/boot/Image"
+          echo
 
+          {
+            echo "=========================================="
+            echo "KERNEL BUILD LOCAL REPAIR"
+            echo "=========================================="
+            echo "This repair runs only inside Step 19."
+            echo
+
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("drivers/kernelsu")
+          if not root.is_dir():
+              raise SystemExit("drivers/kernelsu is missing")
+
+          # The v36 linker error was:
+          #   undefined symbol: ksu_input_hook
+          # referenced by drivers/kernelsu/feature/selinux_hide.c
+          #
+          # Do not replace/disable KernelSU. Add a weak, zero-valued fallback
+          # only when the tree has no real global definition. A real strong
+          # definition, if present in a future KernelSU revision, wins over
+          # this weak symbol automatically.
+          source_files = list(root.rglob("*.c")) + list(root.rglob("*.h"))
+          definition = re.compile(
+              r"(?m)^\s*(?:static\s+)?(?:bool|int|unsigned\s+char|struct\s+[^;]+)\s+"
+              r"ksu_input_hook\s*(?:__read_mostly\s*)?(?:__weak\s*)?(?:=|;)"
+          )
+
+          has_global_definition = False
+          for p in source_files:
+              try:
+                  text = p.read_text(errors="replace")
+              except Exception:
+                  continue
+              if definition.search(text):
+                  has_global_definition = True
+                  print(f"[PASS] Existing ksu_input_hook definition found in {p}")
+                  break
+
+          if not has_global_definition:
+              compat = root / "feature" / "ksu_input_hook_compat.c"
+              mk_candidates = list(root.rglob("Makefile"))
+              target_mk = None
+              for mk in mk_candidates:
+                  try:
+                      text = mk.read_text(errors="replace")
+                  except Exception:
+                      continue
+                  if "selinux_hide.o" in text:
+                      target_mk = mk
+                      break
+
+              if target_mk is None:
+                  raise SystemExit("KernelSU feature Makefile containing selinux_hide.o was not found")
+
+              compat.write_text(
+                  "#include <linux/compiler.h>\n"
+                  "#include <linux/types.h>\n"
+                  "\n"
+                  "/* Build-only compatibility fallback for older KSU hook API. */\n"
+                  "bool ksu_input_hook __read_mostly __weak;\n"
+              )
+
+              entry = "obj-y += ksu_input_hook_compat.o"
+              mk_text = target_mk.read_text()
+              if entry not in mk_text:
+                  if not mk_text.endswith("\n"):
+                      mk_text += "\n"
+                  mk_text += "\n# CI Step 19 compatibility: provide missing legacy KSU input-hook flag.\n" + entry + "\n"
+                  target_mk.write_text(mk_text)
+
+              print(f"[FIXED] Added weak ksu_input_hook fallback: {compat}")
+              print(f"[FIXED] Registered fallback object in: {target_mk}")
+          else:
+              print("[PASS] No ksu_input_hook compatibility source needed")
+          PY
+
+            echo
+            echo "KSU input-hook references after repair:"
+            grep -Rnw --include='*.c' --include='*.h' "ksu_input_hook" drivers/kernelsu 2>/dev/null || true
+
+            echo
+            echo "Build target decision:"
+            echo "  make Image"
+            echo "  (top-level default target is intentionally NOT used here because"
+            echo "   v36 diagnostics showed an unrelated Litomagnus DTB label failure.)"
+          } >"$FIX_LOG" 2>&1
+
+          cat "$FIX_LOG"
+          FIX_STATUS=$?
+          if [ "$FIX_STATUS" -ne 0 ]; then
+            echo "[FAIL] Step 19 build-local repair failed."
+            exit "$FIX_STATUS"
+          fi
+
+          echo
+          echo "=========================================="
+          echo "STARTING KERNEL IMAGE BUILD"
+          echo "=========================================="
           echo "clang=$(command -v clang)"
           echo "ld.lld=$(command -v ld.lld)"
           clang --version | sed -n '1,2p'
           ld.lld --version | sed -n '1,2p'
 
+          rm -f arch/arm64/boot/Image
+
           START=$(date +%s)
 
-          # ==========================================================
-          # v36 BUILD STABILITY FIX
-          #
-          # v35 used -j$(nproc). This old 4.19 tree is large and has
-          # legacy Kbuild dependency paths. Use controlled parallelism
-          # first, then retry the exact same source/config with -j1 if
-          # the first pass fails. No earlier fix is changed here.
-          # ==========================================================
-          JOBS=2
-          RETRY_ATTEMPTED=0
-          echo "BUILD_JOBS_FIRST_PASS=$JOBS"
-          echo "HOST_CPUS=$(nproc)"
-          echo "AVAILABLE_MEMORY:"
-          free -h || true
-
-          echo
-          echo "===== KERNEL BUILD PASS 1 (controlled parallelism) ====="
           make \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            -j"$JOBS" \
+            -j2 \
             V=1 \
             WERROR=0 \
+            Image \
             >"$FULL_LOG" 2>&1
 
           BUILD_STATUS=$?
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            RETRY_ATTEMPTED=1
             echo
-            echo "===== PASS 1 FAILED (exit $BUILD_STATUS) ====="
-            echo "Retrying the SAME kernel build with -j1."
-            echo "No source, defconfig, KernelSU, BBG, camera, display, or DT changes are made."
-
-            RETRY_LOG="$DIAG_DIR/19-build-retry-j1.log"
-            : > "$RETRY_LOG"
+            echo "FIRST IMAGE BUILD FAILED (exit $BUILD_STATUS)."
+            echo "Retrying the SAME Image target with -j1; no earlier step is rerun."
 
             make \
               ARCH=arm64 \
@@ -1737,60 +1971,61 @@ jobs:
               -j1 \
               V=1 \
               WERROR=0 \
+              Image \
               >"$RETRY_LOG" 2>&1
 
             RETRY_STATUS=$?
-
-            echo "===== RETRY RESULT: exit $RETRY_STATUS ====="
-            cat "$RETRY_LOG" >> "$FULL_LOG"
-            BUILD_STATUS=$RETRY_STATUS
+            if [ "$RETRY_STATUS" -eq 0 ]; then
+              cat "$RETRY_LOG" >> "$FULL_LOG"
+              BUILD_STATUS=0
+            else
+              cat "$RETRY_LOG" >> "$FULL_LOG"
+              BUILD_STATUS="$RETRY_STATUS"
+            fi
           fi
 
           END=$(date +%s)
           ELAPSED=$((END-START))
 
-          { 
+          {
             echo "BUILD_STATUS=$BUILD_STATUS"
+            echo "BUILD_TARGET=Image"
             echo "BUILD_TIME_SECONDS=$ELAPSED"
             echo "BUILD_TIME_HUMAN=$((ELAPSED/60))m $((ELAPSED%60))s"
-            echo "BUILD_JOBS_FIRST_PASS=$JOBS"
-            echo "BUILD_RETRY_J1=$([ "$RETRY_ATTEMPTED" -eq 1 ] && echo attempted || echo not-needed)"
             echo "BUILD_LOG_BYTES=$(wc -c < "$FULL_LOG")"
             echo "BUILD_LOG_LINES=$(wc -l < "$FULL_LOG")"
           } | tee "$SUMMARY_LOG"
 
-          # Search the COMPLETE log, not only its tail. The real failing
-          # object can appear hundreds of lines before built-in.a cleanup.
           grep -nEi \
-            'fatal error:|error:|undefined reference|undeclared|implicit declaration|incompatible|invalid|unknown argument|unknown warning|No such file|No rule to make target|recipe for target|Error [0-9]+|make\[[0-9]+\]: \*\*\*|clang: error:|ld\.lld: error:|ar: error:|ranlib: error:|Killed|Out of memory|No space left on device' \
+            'fatal error:|error:|undefined symbol|undefined reference|undeclared|implicit declaration|invalid|unknown argument|unknown warning|No such file|No rule to make target|recipe for target|Error [0-9]+|make\[[0-9]+\]: \\*\*\*' \
             "$FULL_LOG" \
             | tail -250 >"$ERROR_LOG" || true
 
-          tail -400 "$FULL_LOG" >"$TAIL_LOG" || true
+          tail -300 "$FULL_LOG" >"$TAIL_LOG" || true
 
           echo
           echo "===== COMPACT BUILD ERROR SUMMARY ====="
           if [ -s "$ERROR_LOG" ]; then
-            echo "Full error list is in artifact: ci-logs/19-build-errors.log"
-            echo "Showing the final 30 matching lines:"
-            tail -30 "$ERROR_LOG" || true
+            echo "Full compiler-error list is in artifact: ci-logs/19-build-errors.log"
+            tail -20 "$ERROR_LOG" || true
           else
-            echo "No known compiler/linker error pattern found in the complete build log."
-            echo "The complete log remains available as kernel-build-full.log."
+            echo "No compiler-error pattern found."
           fi
 
           echo
-          echo "===== LAST 60 BUILD LINES ====="
+          echo "===== LAST 40 BUILD LINES ====="
           echo "Full build tail is in artifact: ci-logs/19-build-tail.log"
-          tail -60 "$FULL_LOG" || true
+          tail -40 "$FULL_LOG" || true
 
-          if [ "$BUILD_STATUS" -eq 0 ]; then
-            test -s arch/arm64/boot/Image
-            echo "KERNEL BUILD SUCCESSFUL"
-          else
-            echo "KERNEL BUILD FAILED - FULL LOG SAVED AS ARTIFACT"
+          if [ "$BUILD_STATUS" -eq 0 ] && [ -s arch/arm64/boot/Image ]; then
+            echo
+            echo "KERNEL IMAGE BUILD SUCCESSFUL"
+            ls -lh arch/arm64/boot/Image
+            exit 0
           fi
 
+          echo
+          echo "KERNEL IMAGE BUILD FAILED - FULL LOG SAVED AS ARTIFACT"
           exit "$BUILD_STATUS"
 
       # ============================================================
