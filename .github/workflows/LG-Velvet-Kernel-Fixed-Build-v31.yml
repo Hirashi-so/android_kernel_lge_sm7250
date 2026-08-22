@@ -694,6 +694,136 @@ jobs:
           fi
 
           # ------------------------------------------------------------
+          # 6) Stock Lito/Orchid WSA speaker pin-control dependency
+          #
+          # Diagnostics (14) now reaches the DTB compiler and reports:
+          #   wsa883x@02170221 -> missing label "wsa_spkr_en1"
+          #   wsa883x@02170222 -> missing label "wsa_spkr_en2"
+          #
+          # The stock litomagnus-mtp.dtsi explicitly enables two WSA883x
+          # devices and points them at these labels. In the current stock
+          # lito-audio/lito-pinctrl files the generic WSA speaker definitions
+          # are commented out because the generic Lito audio overlay disables
+          # the WSA speaker amp. The litomagnus device overlay, however,
+          # re-enables WSA devices (wsa-max-devs=2), so its existing
+          # references require the same stock speaker pin-control definitions.
+          #
+          # Reintroduce ONLY the exact stock Lito speaker reset definitions
+          # needed by the existing litomagnus WSA883x references. Nothing is
+          # downloaded and no new WSA hardware/configuration is invented.
+          # ------------------------------------------------------------
+          LITO_PINCTRL="arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi"
+          test -f "$LITO_PINCTRL"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi")
+          s = p.read_text()
+
+          # Exact stock Lito speaker pin definitions, scoped to the
+          # litomagnus device tree because this device already enables WSA883x.
+          tlmm_block = r"""
+          &tlmm {
+              /* Stock Lito WSA speaker reset pins required by litomagnus WSA883x */
+              spkr_1_sd_n {
+                  spkr_1_sd_n_sleep: spkr_1_sd_n_sleep {
+                      mux {
+                          pins = "gpio58";
+                          function = "gpio";
+                      };
+                      config {
+                          pins = "gpio58";
+                          drive-strength = <2>;
+                          bias-pull-down;
+                          input-enable;
+                      };
+                  };
+
+                  spkr_1_sd_n_active: spkr_1_sd_n_active {
+                      mux {
+                          pins = "gpio58";
+                          function = "gpio";
+                      };
+                      config {
+                          pins = "gpio58";
+                          drive-strength = <16>;
+                          bias-disable;
+                          output-high;
+                      };
+                  };
+              };
+
+              spkr_2_sd_n {
+                  spkr_2_sd_n_sleep: spkr_2_sd_n_sleep {
+                      mux {
+                          pins = "gpio65";
+                          function = "gpio";
+                      };
+                      config {
+                          pins = "gpio65";
+                          drive-strength = <2>;
+                          bias-pull-down;
+                          input-enable;
+                      };
+                  };
+
+                  spkr_2_sd_n_active: spkr_2_sd_n_active {
+                      mux {
+                          pins = "gpio65";
+                          function = "gpio";
+                      };
+                      config {
+                          pins = "gpio65";
+                          drive-strength = <16>;
+                          bias-disable;
+                          output-high;
+                      };
+                  };
+              };
+          };
+          """
+
+          soc_block = r"""
+          &soc {
+              /* Stock Lito WSA speaker control nodes required by litomagnus */
+              wsa_spkr_en1: wsa_spkr_en1_pinctrl {
+                  compatible = "qcom,msm-cdc-pinctrl";
+                  pinctrl-names = "aud_active", "aud_sleep";
+                  pinctrl-0 = <&spkr_1_sd_n_active>;
+                  pinctrl-1 = <&spkr_1_sd_n_sleep>;
+              };
+
+              wsa_spkr_en2: wsa_spkr_en2_pinctrl {
+                  compatible = "qcom,msm-cdc-pinctrl";
+                  pinctrl-names = "aud_active", "aud_sleep";
+                  pinctrl-0 = <&spkr_2_sd_n_active>;
+                  pinctrl-1 = <&spkr_2_sd_n_sleep>;
+              };
+          };
+          """
+
+          # Add only if the labels are not already defined anywhere in the
+          # device overlay. This prevents duplicate-label errors.
+          if "spkr_1_sd_n_active:" not in s:
+              s += "\n" + tlmm_block.strip() + "\n"
+              print("[FIXED] Added stock Lito WSA speaker GPIO states to litomagnus DTS.")
+          else:
+              print("[PASS] WSA speaker GPIO states already present.")
+
+          if "wsa_spkr_en1:" not in s:
+              s += "\n" + soc_block.strip() + "\n"
+              print("[FIXED] Added stock Lito WSA speaker control nodes to litomagnus DTS.")
+          else:
+              print("[PASS] WSA speaker control nodes already present.")
+
+          p.write_text(s)
+          PY
+
+          echo "[PASS] Verify WSA883x dependencies are defined in litomagnus DTS:"
+          grep -nE 'spkr_1_sd_n_(active|sleep):|spkr_2_sd_n_(active|sleep):|wsa_spkr_en[12]:' "$LITOMAGNUS_DTSI"
+
+          # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
