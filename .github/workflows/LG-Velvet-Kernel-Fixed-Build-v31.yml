@@ -1823,23 +1823,29 @@ jobs:
           export CROSS_COMPILE_ARM32="$GCC32_DIR/bin/arm-linux-androideabi-"
 
           # ========================================================
-          # v34 KernelSU 4.19 link compatibility
-          # Previous kernel-link diagnostics showed selinux_hide.o
-          # referencing ksu_input_hook / ksu_handle_input_handle_event
-          # while this configuration uses CONFIG_KSU_KPROBE_HOOKS. Add
-          # weak fallbacks only when this translation unit references
-          # the symbols without defining them. A real strong symbol
-          # still overrides the weak definition.
+          # v35 KernelSU 4.19 link compatibility
+          #
+          # v34 did not modify selinux_hide.c because it searched for
+          # an include anchor that this source tree does not have.
+          # The v34 diagnostics show an unresolved ksu_input_hook at
+          # selinux_hide.c:271. The source contains an extern
+          # declaration but no definition in this configuration.
+          #
+          # Fix ONLY that declaration. A strong definition elsewhere,
+          # if present, overrides this weak definition.
           # ========================================================
           KSU_HIDE="drivers/kernelsu/feature/selinux_hide.c"
           KSU_FIX_LOG="$DIAG_DIR/19-kernelsu-input-hook-compat.log"
           : > "$KSU_FIX_LOG"
 
           {
-            echo "KERNELSU INPUT-HOOK LINK COMPATIBILITY v34"
+            echo "KERNELSU INPUT-HOOK LINK COMPATIBILITY v35"
             echo "=========================================="
-            if [ -f "$KSU_HIDE" ] && grep -q 'ksu_input_hook\|ksu_handle_input_handle_event' "$KSU_HIDE"; then
-              cp -n "$KSU_HIDE" "$KSU_HIDE.pre-v34-ksu-input-hook.bak" 2>/dev/null || true
+
+            if [ ! -f "$KSU_HIDE" ]; then
+              echo "[WARN] $KSU_HIDE not found; no source patch applied."
+            else
+              cp -n "$KSU_HIDE" "$KSU_HIDE.pre-v35-ksu-input-hook.bak" 2>/dev/null || true
 
               python3 - <<'PY'
           from pathlib import Path
@@ -1848,45 +1854,41 @@ jobs:
           p = Path("drivers/kernelsu/feature/selinux_hide.c")
           s = p.read_text()
 
-          need_var = "ksu_input_hook" in s and not re.search(
-              r'\bbool\s+ksu_input_hook\s*(?:__read_mostly\s*)?=', s
-          )
-          need_fn = "ksu_handle_input_handle_event" in s and not re.search(
-              r'ksu_handle_input_handle_event\s*\([^;{}]*\)\s*\{', s
-          )
+          old = "extern bool ksu_input_hook __read_mostly;"
+          new = "bool __attribute__((weak)) ksu_input_hook __read_mostly = 0;"
 
-          marker = "/* v34: weak compatibility for optional KernelSU input hook */"
-          if need_var or need_fn:
-              if marker not in s:
-                  block = "\n" + marker + "\n"
-                  if need_var:
-                      block += "bool __weak ksu_input_hook;\n"
-                  if need_fn:
-                      block += (
-                          "int __weak ksu_handle_input_handle_event("
-                          "unsigned int *type, unsigned int *code, int *value)\n"
-                          "{\n"
-                          "    return 0;\n"
-                          "}\n"
-                      )
-                  anchor = '#include "selinux_hide.h"'
-                  if anchor not in s:
-                      raise SystemExit("selinux_hide.h include anchor not found")
-                  s = s.replace(anchor, anchor + block, 1)
-                  p.write_text(s)
-                  print(f"[FIXED] weak fallback: variable={need_var}, function={need_fn}")
-              else:
-                  print("[PASS] v34 compatibility block already present")
+          if new in s:
+              print("[PASS] v35 weak ksu_input_hook definition already present")
+          elif old in s:
+              p.write_text(s.replace(old, new, 1))
+              print("[FIXED] replaced legacy extern ksu_input_hook with weak definition")
           else:
-              print("[PASS] no missing KernelSU input-hook definition detected")
+              pat = re.compile(
+                  r'^[ \t]*extern[ \t]+bool[ \t]+ksu_input_hook'
+                  r'(?:[ \t]+__read_mostly)?[ \t]*;[ \t]*$',
+                  re.M,
+              )
+              m = pat.search(s)
+              if m:
+                  p.write_text(
+                      s[:m.start()] +
+                      "bool __attribute__((weak)) ksu_input_hook __read_mostly = 0;" +
+                      s[m.end():]
+                  )
+                  print("[FIXED] replaced variant legacy extern ksu_input_hook with weak definition")
+              else:
+                  print("[PASS] no standalone legacy extern declaration found")
           PY
-            else
-              echo "[PASS] selinux_hide.c has no optional input-hook references"
-            fi
 
-            echo
-            echo "Relevant symbols after compatibility check:"
-            grep -nE 'ksu_input_hook|ksu_handle_input_handle_event|v34: weak compatibility' "$KSU_HIDE" 2>/dev/null || true
+              echo
+              echo "Relevant ksu_input_hook declarations after v35:"
+              grep -nE '^[[:space:]]*(extern[[:space:]]+)?bool.*ksu_input_hook|ksu_input_hook' \
+                "$KSU_HIDE" 2>/dev/null || true
+
+              echo
+              echo "Source diff for v35:"
+              git diff -- "$KSU_HIDE" 2>/dev/null || true
+            fi
           } > "$KSU_FIX_LOG" 2>&1
 
           cat "$KSU_FIX_LOG"
