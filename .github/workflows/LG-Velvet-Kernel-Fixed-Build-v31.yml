@@ -413,11 +413,27 @@ jobs:
           export CROSS_COMPILE="$GCC64_DIR/bin/aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="$GCC32_DIR/bin/arm-linux-androideabi-"
 
-          # Qualcomm clock trace.h uses TRACE_INCLUDE_PATH "." and this
-          # source tree expects its local directory on the compiler include
-          # path. This is a build-environment fix only; source/behavior is
-          # otherwise unchanged.
-          export KCFLAGS="-Idrivers/clk/qcom${KCFLAGS:+ $KCFLAGS}"
+          # Qualcomm clock trace.h uses TRACE_INCLUDE_PATH ".".
+          # Do NOT put drivers/clk/qcom in global KCFLAGS: doing so makes
+          # unrelated trace users resolve Qualcomm's trace.h and causes
+          # check_trace_callback_type_clk_measure errors in regmap.
+          #
+          # Scope the include path only to the Qualcomm clock directory,
+          # using the normal Kbuild ccflags-y mechanism. This is a
+          # build-only compatibility adjustment; no kernel feature is added.
+          QCOM_MAKE="drivers/clk/qcom/Makefile"
+          test -f "$QCOM_MAKE"
+
+          if ! grep -qF 'ccflags-y += -I$(src)' "$QCOM_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: local TRACE_INCLUDE_PATH for qcom trace.h"
+              echo 'ccflags-y += -I$(src)'
+            } >> "$QCOM_MAKE"
+          fi
+
+          echo "[PASS] Qualcomm trace include path scoped to drivers/clk/qcom."
+          grep -nF 'ccflags-y += -I$(src)' "$QCOM_MAKE"
 
           echo "=========================================="
           echo "STARTING STOCK + KERNELSU + SUSFS BUILD"
@@ -436,7 +452,6 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            KCFLAGS="$KCFLAGS" \
             -j"$(nproc)" \
             V=1 \
             WERROR=0 \
