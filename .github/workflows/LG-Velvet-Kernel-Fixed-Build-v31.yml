@@ -581,6 +581,43 @@ jobs:
           grep -nF 'subdir-ccflags-y += -I$(src)' "$LGE_DISPLAY_MAKE"
 
           # ------------------------------------------------------------
+          # 6) Stock display PLL trace-header include path
+          #
+          # Current build log reaches:
+          #   techpack/display/pll/dsi_pll_10nm.c
+          #   -> techpack/display/pll/pll_trace.h
+          #   -> include/trace/define_trace.h
+          #   -> fatal error: './pll_trace.h' file not found
+          #
+          # The trace header is in the same stock directory:
+          #   techpack/display/pll/pll_trace.h
+          #
+          # define_trace.h expands TRACE_INCLUDE_PATH relative to the
+          # compiler include search path. Add ONLY the stock PLL directory
+          # to its own nested build. Do not copy/download another header.
+          # ------------------------------------------------------------
+          PLL_DIR="techpack/display/pll"
+          PLL_MAKE="$PLL_DIR/Makefile"
+          PLL_HEADER="$PLL_DIR/pll_trace.h"
+
+          test -d "$PLL_DIR"
+          test -f "$PLL_MAKE"
+          test -f "$PLL_HEADER"
+
+          if ! grep -qF 'subdir-ccflags-y += -I$(src)' "$PLL_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: stock PLL trace header for nested display PLL objects"
+              echo 'subdir-ccflags-y += -I$(src)'
+            } >> "$PLL_MAKE"
+          fi
+
+          echo "[PASS] Stock PLL trace header exists:"
+          ls -lh "$PLL_HEADER"
+          echo "[PASS] PLL parent include path propagated:"
+          grep -nF 'subdir-ccflags-y += -I$(src)' "$PLL_MAKE"
+
+          # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
