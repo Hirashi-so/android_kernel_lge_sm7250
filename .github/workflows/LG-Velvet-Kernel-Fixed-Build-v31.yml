@@ -150,22 +150,54 @@ jobs:
           LOG="$DIAG_DIR/07-toolchain-check.log"
           : > "$LOG"
           {
+            echo "=================================="
+            echo "TOOLCHAIN ENVIRONMENT"
+            echo "=================================="
+
+            # IMPORTANT: GITHUB_PATH affects later steps, not the current step.
+            # Export PATH here as well so ld.lld is available immediately.
+            export PATH="$CLANG_DIR/bin:$GCC64_DIR/bin:$GCC32_DIR/bin:$PATH"
+
             echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
             echo "$GCC64_DIR/bin" >> "$GITHUB_PATH"
             echo "$GCC32_DIR/bin" >> "$GITHUB_PATH"
-            {
-              echo "CROSS_COMPILE=$GCC64_DIR/bin/aarch64-linux-android-"
-              echo "CROSS_COMPILE_ARM32=$GCC32_DIR/bin/arm-linux-androideabi-"
-            } >> "$GITHUB_ENV"
+
+            echo "CROSS_COMPILE=$GCC64_DIR/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
+            echo "CROSS_COMPILE_ARM32=$GCC32_DIR/bin/arm-linux-androideabi-" >> "$GITHUB_ENV"
+
+            echo
+            echo "PATH:"
+            echo "$PATH"
+
+            echo
+            echo "CLANG:"
             command -v clang
-            clang --version
+            clang --version | sed -n '1,2p'
+
+            echo
+            echo "LLD:"
             command -v ld.lld
-            ld.lld --version
+            ld.lld --version | sed -n '1,2p'
+
+            echo
+            echo "AARCH64 GCC:"
             command -v aarch64-linux-android-gcc
+            aarch64-linux-android-gcc --version | sed -n '1p'
+
+            echo
+            echo "ARM32 GCC:"
             command -v arm-linux-androideabi-gcc
+            arm-linux-androideabi-gcc --version | sed -n '1p'
+
+            echo
+            echo "Exact tool files:"
+            ls -lh "$CLANG_DIR/bin/clang" "$CLANG_DIR/bin/ld.lld"
+
+            echo
+            echo "[PASS] Toolchain Ready"
           } > "$LOG" 2>&1
           STATUS=$?
-          tail -100 "$LOG" || true
+          cat "$LOG"
           exit "$STATUS"
 
       # ONLY FEATURE 1: official KernelSU for this non-GKI 4.19 kernel.
