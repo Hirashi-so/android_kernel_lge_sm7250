@@ -517,26 +517,30 @@ jobs:
           # ------------------------------------------------------------
           OIS_DIR="techpack/camera/drivers/cam_sensor_module/cam_ois"
           OIS_SUBDIR="$OIS_DIR/lgit_onsemi"
-          OIS_MAKE="$OIS_SUBDIR/Makefile"
+          OIS_PARENT_MAKE="$OIS_DIR/Makefile"
           OIS_HEADER="$OIS_DIR/cam_ois_core.h"
 
           test -d "$OIS_DIR"
           test -d "$OIS_SUBDIR"
-          test -f "$OIS_MAKE"
+          test -f "$OIS_PARENT_MAKE"
           test -f "$OIS_HEADER"
 
-          if ! grep -qF 'ccflags-y += -I$(src)/..' "$OIS_MAKE"; then
+          # Kbuild's subdir-ccflags-y is intentionally used in the
+          # parent cam_ois Kbuild file. Unlike ccflags-y in lgit_onsemi,
+          # this applies to cam_ois itself and every nested OIS directory,
+          # including trees that use a Kbuild file instead of Makefile.
+          if ! grep -qF 'subdir-ccflags-y += -I$(src)' "$OIS_PARENT_MAKE"; then
             {
               echo
-              echo "# Build compatibility: stock cam_ois parent headers for LGIT/Onsemi OIS"
-              echo 'ccflags-y += -I$(src)/..'
-            } >> "$OIS_MAKE"
+              echo "# Build compatibility: stock cam_ois headers for nested OIS drivers"
+              echo 'subdir-ccflags-y += -I$(src)'
+            } >> "$OIS_PARENT_MAKE"
           fi
 
           echo "[PASS] Stock cam_ois_core.h exists:"
           ls -lh "$OIS_HEADER"
-          echo "[PASS] LGIT/Onsemi OIS parent include path:"
-          grep -nF 'ccflags-y += -I$(src)/..' "$OIS_MAKE"
+          echo "[PASS] cam_ois parent include path propagated to nested OIS:"
+          grep -nF 'subdir-ccflags-y += -I$(src)' "$OIS_PARENT_MAKE"
 
           # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
