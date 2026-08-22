@@ -500,7 +500,46 @@ jobs:
           grep -nF 'ccflags-y += -I$(src)' "$ACT_MAKE"
 
           # ------------------------------------------------------------
-          # 5) Linux 4.19 fault-inject WRITE_ONCE compatibility
+          # 5) Camera cam_ois nested LGIT/Onsemi include path
+          #
+          # The current build log reaches:
+          #   lgit_s5kgw1_onsemi_ois.c:10:10:
+          #   fatal error: 'cam_ois_core.h' file not found
+          #
+          # The source file is under cam_ois/lgit_onsemi/, while the
+          # stock cam_ois_core.h belongs to the parent cam_ois directory.
+          # Kbuild does not automatically search that parent directory
+          # for a quoted header from the nested subdirectory.
+          #
+          # Add ONLY the parent cam_ois directory to the nested
+          # lgit_onsemi Kbuild include path. No header is downloaded,
+          # copied, replaced, or generated.
+          # ------------------------------------------------------------
+          OIS_DIR="techpack/camera/drivers/cam_sensor_module/cam_ois"
+          OIS_SUBDIR="$OIS_DIR/lgit_onsemi"
+          OIS_MAKE="$OIS_SUBDIR/Makefile"
+          OIS_HEADER="$OIS_DIR/cam_ois_core.h"
+
+          test -d "$OIS_DIR"
+          test -d "$OIS_SUBDIR"
+          test -f "$OIS_MAKE"
+          test -f "$OIS_HEADER"
+
+          if ! grep -qF 'ccflags-y += -I$(src)/..' "$OIS_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: stock cam_ois parent headers for LGIT/Onsemi OIS"
+              echo 'ccflags-y += -I$(src)/..'
+            } >> "$OIS_MAKE"
+          fi
+
+          echo "[PASS] Stock cam_ois_core.h exists:"
+          ls -lh "$OIS_HEADER"
+          echo "[PASS] LGIT/Onsemi OIS parent include path:"
+          grep -nF 'ccflags-y += -I$(src)/..' "$OIS_MAKE"
+
+          # ------------------------------------------------------------
+          # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
           #       if (!WRITE_ONCE(current->fail_nth, fail_nth - 1))
@@ -530,7 +569,7 @@ jobs:
           PY
 
           # ------------------------------------------------------------
-          # 4) LG NFC prototype compatibility
+          # 7) LG NFC prototype compatibility
           #    Clang 20 treats -Wstrict-prototypes as an error for this
           #    old-style zero-argument declaration. Make it explicit.
           # ------------------------------------------------------------
