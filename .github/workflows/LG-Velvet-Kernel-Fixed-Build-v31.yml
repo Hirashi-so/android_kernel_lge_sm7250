@@ -706,23 +706,27 @@ jobs:
           echo "[PASS] Both litomagnus MTP/CDP DTSI files are free of the four dead WSA references."
 
           # ------------------------------------------------------------
-          # 6) Stock Lito/Orchid WSA speaker pin-control dependency
+          # 7) Stock Lito WSA speaker pin-control dependency
           #
-          # Diagnostics (14) now reaches the DTB compiler and reports:
-          #   wsa883x@02170221 -> missing label "wsa_spkr_en1"
-          #   wsa883x@02170222 -> missing label "wsa_spkr_en2"
+          # Diagnostics (16) reaches the DTB compiler and stops only on:
+          #   litomagnus-cdp.dtb
+          #   wsa883x@02170221 -> missing "wsa_spkr_en1"
+          #   wsa883x@02170222 -> missing "wsa_spkr_en2"
           #
-          # The stock litomagnus-mtp.dtsi explicitly enables two WSA883x
-          # devices and points them at these labels. In the current stock
-          # lito-audio/lito-pinctrl files the generic WSA speaker definitions
-          # are commented out because the generic Lito audio overlay disables
-          # the WSA speaker amp. The litomagnus device overlay, however,
-          # re-enables WSA devices (wsa-max-devs=2), so its existing
-          # references require the same stock speaker pin-control definitions.
+          # The important correction here is WHERE the definitions belong.
+          # The previous workflow added them only to litomagnus-mtp.dtsi,
+          # but the failing target is litomagnus-cdp.dtb. That makes the
+          # definitions unavailable to the CDP tree.
           #
-          # Reintroduce ONLY the exact stock Lito speaker reset definitions
-          # needed by the existing litomagnus WSA883x references. Nothing is
-          # downloaded and no new WSA hardware/configuration is invented.
+          # Upstream Qualcomm Lito device-tree history defines the WSA
+          # speaker reset GPIO states in lito-pinctrl.dtsi and defines
+          # wsa_spkr_en1 / wsa_spkr_en2 under &soc. We restore those exact
+          # stock definitions in the common Lito pinctrl file so BOTH the
+          # MTP and CDP Magnus trees see the same stock dependencies.
+          #
+          # No WSA device is added here. No camera/display feature is
+          # changed. No external file is downloaded. This only restores
+          # the stock definitions required by existing WSA883x references.
           # ------------------------------------------------------------
           LITO_PINCTRL="arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi"
           test -f "$LITO_PINCTRL"
@@ -730,20 +734,23 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi")
+          p = Path("arch/arm64/boot/dts/vendor/qcom/lito-pinctrl.dtsi")
           s = p.read_text()
 
-          # Exact stock Lito speaker pin definitions, scoped to the
-          # litomagnus device tree because this device already enables WSA883x.
+          # These are the stock Lito WSA speaker reset pin states from the
+          # Qualcomm Lito device-tree source. Keep the definitions scoped to
+          # the pinctrl node and expose the two existing speaker controls
+          # under &soc.
           tlmm_block = r"""
           &tlmm {
-              /* Stock Lito WSA speaker reset pins required by litomagnus WSA883x */
+              /* Stock Lito WSA speaker reset pins */
               spkr_1_sd_n {
                   spkr_1_sd_n_sleep: spkr_1_sd_n_sleep {
                       mux {
                           pins = "gpio58";
                           function = "gpio";
                       };
+
                       config {
                           pins = "gpio58";
                           drive-strength = <2>;
@@ -757,6 +764,7 @@ jobs:
                           pins = "gpio58";
                           function = "gpio";
                       };
+
                       config {
                           pins = "gpio58";
                           drive-strength = <16>;
@@ -772,6 +780,7 @@ jobs:
                           pins = "gpio65";
                           function = "gpio";
                       };
+
                       config {
                           pins = "gpio65";
                           drive-strength = <2>;
@@ -785,6 +794,7 @@ jobs:
                           pins = "gpio65";
                           function = "gpio";
                       };
+
                       config {
                           pins = "gpio65";
                           drive-strength = <16>;
@@ -798,7 +808,7 @@ jobs:
 
           soc_block = r"""
           &soc {
-              /* Stock Lito WSA speaker control nodes required by litomagnus */
+              /* Stock Lito WSA speaker controls */
               wsa_spkr_en1: wsa_spkr_en1_pinctrl {
                   compatible = "qcom,msm-cdc-pinctrl";
                   pinctrl-names = "aud_active", "aud_sleep";
@@ -815,25 +825,38 @@ jobs:
           };
           """
 
-          # Add only if the labels are not already defined anywhere in the
-          # device overlay. This prevents duplicate-label errors.
+          # The clean checkout is expected not to contain these definitions
+          # in the current source. If they already exist, do not duplicate
+          # labels; simply verify them below.
           if "spkr_1_sd_n_active:" not in s:
-              s += "\n" + tlmm_block.strip() + "\n"
-              print("[FIXED] Added stock Lito WSA speaker GPIO states to litomagnus DTS.")
+              s = s.rstrip() + "\n\n" + tlmm_block.strip() + "\n"
+              print("[FIXED] Restored stock Lito WSA speaker GPIO states in lito-pinctrl.dtsi.")
           else:
-              print("[PASS] WSA speaker GPIO states already present.")
+              print("[PASS] Lito WSA speaker GPIO states already exist.")
 
           if "wsa_spkr_en1:" not in s:
-              s += "\n" + soc_block.strip() + "\n"
-              print("[FIXED] Added stock Lito WSA speaker control nodes to litomagnus DTS.")
+              s = s.rstrip() + "\n\n" + soc_block.strip() + "\n"
+              print("[FIXED] Restored stock wsa_spkr_en1/en2 controls in lito-pinctrl.dtsi.")
           else:
-              print("[PASS] WSA speaker control nodes already present.")
+              print("[PASS] Lito WSA speaker controls already exist.")
 
           p.write_text(s)
           PY
 
-          echo "[PASS] Verify WSA883x dependencies are defined in litomagnus DTS:"
-          grep -nE 'spkr_1_sd_n_(active|sleep):|spkr_2_sd_n_(active|sleep):|wsa_spkr_en[12]:' "$LITOMAGNUS_DTSI"
+          echo "[PASS] Verify common Lito WSA definitions:"
+          grep -nE 'spkr_1_sd_n_(active|sleep):|spkr_2_sd_n_(active|sleep):|wsa_spkr_en[12]:' "$LITO_PINCTRL"
+
+          # The CDP error is specifically caused by these existing references.
+          # Verify the definitions now exist in the common source and are not
+          # being faked with dtc -f.
+          grep -q 'wsa_spkr_en1:' "$LITO_PINCTRL"
+          grep -q 'wsa_spkr_en2:' "$LITO_PINCTRL"
+          grep -q 'spkr_1_sd_n_active:' "$LITO_PINCTRL"
+          grep -q 'spkr_1_sd_n_sleep:' "$LITO_PINCTRL"
+          grep -q 'spkr_2_sd_n_active:' "$LITO_PINCTRL"
+          grep -q 'spkr_2_sd_n_sleep:' "$LITO_PINCTRL"
+
+          echo "[PASS] Existing WSA883x phandle dependencies now have stock definitions in common Lito pinctrl."
 
           # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
