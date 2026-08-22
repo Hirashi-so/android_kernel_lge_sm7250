@@ -413,14 +413,18 @@ jobs:
           export CROSS_COMPILE="$GCC64_DIR/bin/aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="$GCC32_DIR/bin/arm-linux-androideabi-"
 
-          # Qualcomm clock trace.h uses TRACE_INCLUDE_PATH ".".
-          # Do NOT put drivers/clk/qcom in global KCFLAGS: doing so makes
-          # unrelated trace users resolve Qualcomm's trace.h and causes
-          # check_trace_callback_type_clk_measure errors in regmap.
+          # Build-only compatibility fixes are scoped to the exact stock
+          # source directories/files that failed with this Clang 20 build.
+          # No global KCFLAGS and no unrelated kernel features are added.
           #
-          # Scope the include path only to the Qualcomm clock directory,
-          # using the normal Kbuild ccflags-y mechanism. This is a
-          # build-only compatibility adjustment; no kernel feature is added.
+          # Qualcomm clock trace.h uses TRACE_INCLUDE_PATH "."; the include
+          # path is scoped to drivers/clk/qcom via Kbuild ccflags-y.
+          # Camera cam_trace.h needs the cam_req_mgr local header path.
+          # fault-inject.c and lgenfc.c receive source-level compatibility
+          # corrections for this kernel/compiler combination.
+          # ------------------------------------------------------------
+          # 1) Qualcomm clock trace include path
+          # ------------------------------------------------------------
           QCOM_MAKE="drivers/clk/qcom/Makefile"
           test -f "$QCOM_MAKE"
 
@@ -434,6 +438,86 @@ jobs:
 
           echo "[PASS] Qualcomm trace include path scoped to drivers/clk/qcom."
           grep -nF 'ccflags-y += -I$(src)' "$QCOM_MAKE"
+
+          # ------------------------------------------------------------
+          # 2) Camera cam_req_mgr local include path
+          #    cam_trace.h includes cam_req_mgr_core.h by name.
+          #    The header is part of the stock source tree; only the
+          #    local Kbuild include path is missing for this Clang build.
+          # ------------------------------------------------------------
+          CAM_MAKE="techpack/camera/drivers/cam_req_mgr/Makefile"
+          test -f "$CAM_MAKE"
+
+          if ! grep -qF 'ccflags-y += -I$(src)' "$CAM_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: cam_trace.h local cam_req_mgr headers"
+              echo 'ccflags-y += -I$(src)'
+            } >> "$CAM_MAKE"
+          fi
+
+          echo "[PASS] Camera cam_req_mgr include path scoped to cam_req_mgr."
+          grep -nF 'ccflags-y += -I$(src)' "$CAM_MAKE"
+
+          # ------------------------------------------------------------
+          # 3) Linux 4.19 fault-inject WRITE_ONCE compatibility
+          #    Stock 4.19 compiler headers define WRITE_ONCE() as a
+          #    statement-style macro. This source used it as an expression:
+          #       if (!WRITE_ONCE(current->fail_nth, fail_nth - 1))
+          #    Keep the same behavior with an explicit decrement/store/test.
+          # ------------------------------------------------------------
+          FAULT_SRC="lib/fault-inject.c"
+          test -f "$FAULT_SRC"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("lib/fault-inject.c")
+          s = p.read_text()
+
+          old = """\t\tif (fail_nth) {\n\t\t\tif (!WRITE_ONCE(current->fail_nth, fail_nth - 1))\n\t\t\t\tgoto fail;\n\n\t\t\treturn false;\n\t\t}"""
+
+          new = """\t\tif (fail_nth) {\n\t\t\tfail_nth--;\n\t\t\tWRITE_ONCE(current->fail_nth, fail_nth);\n\t\t\tif (!fail_nth)\n\t\t\t\tgoto fail;\n\n\t\t\treturn false;\n\t\t}"""
+
+          if old in s:
+              s = s.replace(old, new, 1)
+              p.write_text(s)
+              print("[FIXED] lib/fault-inject.c WRITE_ONCE expression compatibility")
+          elif "fail_nth--;" in s and "WRITE_ONCE(current->fail_nth, fail_nth);" in s:
+              print("[PASS] lib/fault-inject.c already uses statement-compatible form")
+          else:
+              raise SystemExit("Expected fault-inject fail_nth block was not found")
+          PY
+
+          # ------------------------------------------------------------
+          # 4) LG NFC prototype compatibility
+          #    Clang 20 treats -Wstrict-prototypes as an error for this
+          #    old-style zero-argument declaration. Make it explicit.
+          # ------------------------------------------------------------
+          NFC_SRC="drivers/nfc/lge/lgenfc.c"
+          test -f "$NFC_SRC"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/nfc/lge/lgenfc.c")
+          s = p.read_text()
+
+          old = "enum NfcChip getChipset() {"
+          new = "enum NfcChip getChipset(void) {"
+
+          if old in s:
+              s = s.replace(old, new, 1)
+              p.write_text(s)
+              print("[FIXED] drivers/nfc/lge/lgenfc.c strict-prototype compatibility")
+          elif "enum NfcChip getChipset(void)" in s:
+              print("[PASS] lgenfc.c prototype already fixed")
+          else:
+              raise SystemExit("Expected getChipset() declaration was not found")
+          PY
+
+          echo
+          echo "[PASS] Scoped source compatibility fixes prepared."
 
           echo "=========================================="
           echo "STARTING STOCK + KERNELSU + SUSFS BUILD"
