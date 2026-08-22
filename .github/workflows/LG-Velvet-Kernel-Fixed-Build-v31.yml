@@ -618,6 +618,65 @@ jobs:
           grep -nF 'subdir-ccflags-y += -I$(src)' "$PLL_MAKE"
 
           # ------------------------------------------------------------
+          # 6) Stock DTS consistency fix: litomagnus MTP WSA references
+          #
+          # Current build log reaches the stock DTB compiler and fails only
+          # because litomagnus-mtp.dtsi references four labels:
+          #   wsa881x_0211 .. wsa881x_0214
+          #
+          # In this stock tree those WSA node definitions are intentionally
+          # commented out in lito-audio-overlay.dtsi (WSA speaker amp
+          # disabled), so the labels do not exist. The litomagnus overlay
+          # still contains four status="disabled" references to those absent
+          # labels. dtc treats an unresolved phandle label as a hard error.
+          #
+          # Do NOT download or add another WSA node definition: doing so would
+          # change the stock audio/device-tree behavior. Instead, remove only
+          # the four dead references from this overlay. They already request
+          # status="disabled" and therefore cannot represent an enabled stock
+          # feature. All other stock DTS content remains untouched.
+          # ------------------------------------------------------------
+          LITOMAGNUS_DTSI="arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi"
+          test -f "$LITOMAGNUS_DTSI"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi")
+          s = p.read_text()
+
+          dead_refs = [
+              "&wsa881x_0211",
+              "&wsa881x_0212",
+              "&wsa881x_0213",
+              "&wsa881x_0214",
+          ]
+
+          found = [x for x in dead_refs if x in s]
+          if found:
+              lines = s.splitlines(True)
+              out = []
+              for line in lines:
+                  stripped = line.strip()
+                  if stripped in dead_refs or stripped.startswith("&wsa881x_021"):
+                      continue
+                  out.append(line)
+              s2 = "".join(out)
+              p.write_text(s2)
+              print("[FIXED] Removed only unresolved disabled WSA phandle references:")
+              for x in found:
+                  print("  " + x)
+          else:
+              print("[PASS] No unresolved WSA references remain.")
+          PY
+
+          echo "[PASS] Verify no dead WSA phandle references remain:"
+          if grep -nE '^[[:space:]]*&wsa881x_021[1-4][[:space:]]*$' "$LITOMAGNUS_DTSI"; then
+            echo "[FAIL] Unresolved WSA references still present."
+            exit 1
+          fi
+
+          # ------------------------------------------------------------
           # 6) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
