@@ -460,7 +460,47 @@ jobs:
           grep -nF 'ccflags-y += -I$(src)' "$CAM_MAKE"
 
           # ------------------------------------------------------------
-          # 3) Linux 4.19 fault-inject WRITE_ONCE compatibility
+          # 3) Camera cam_cci local include path
+          #    cam_sensor_i2c.h includes cam_cci_dev.h by name.
+          #    The header is part of the stock source tree; only the
+          #    cam_cci directory needs to be added to its local search
+          #    path for this Clang build.
+          # ------------------------------------------------------------
+          CCI_MAKE="techpack/camera/drivers/cam_sensor_module/cam_cci/Makefile"
+          test -f "$CCI_MAKE"
+
+          if ! grep -qF 'ccflags-y += -I$(src)' "$CCI_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: local cam_cci headers"
+              echo 'ccflags-y += -I$(src)'
+            } >> "$CCI_MAKE"
+          fi
+
+          echo "[PASS] Camera cam_cci include path scoped to cam_cci."
+          grep -nF 'ccflags-y += -I$(src)' "$CCI_MAKE"
+
+          # ------------------------------------------------------------
+          # 4) Camera cam_actuator local include path
+          #    lgit_onsemi_actuator_utils.c includes cam_actuator_core.h
+          #    by name. The header is already in the stock tree.
+          # ------------------------------------------------------------
+          ACT_MAKE="techpack/camera/drivers/cam_sensor_module/cam_actuator/Makefile"
+          test -f "$ACT_MAKE"
+
+          if ! grep -qF 'ccflags-y += -I$(src)' "$ACT_MAKE"; then
+            {
+              echo
+              echo "# Build compatibility: local cam_actuator headers"
+              echo 'ccflags-y += -I$(src)'
+            } >> "$ACT_MAKE"
+          fi
+
+          echo "[PASS] Camera cam_actuator include path scoped to cam_actuator."
+          grep -nF 'ccflags-y += -I$(src)' "$ACT_MAKE"
+
+          # ------------------------------------------------------------
+          # 5) Linux 4.19 fault-inject WRITE_ONCE compatibility
           #    Stock 4.19 compiler headers define WRITE_ONCE() as a
           #    statement-style macro. This source used it as an expression:
           #       if (!WRITE_ONCE(current->fail_nth, fail_nth - 1))
