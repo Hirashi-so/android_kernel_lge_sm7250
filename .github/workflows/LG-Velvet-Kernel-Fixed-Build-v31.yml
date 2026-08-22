@@ -636,20 +636,29 @@ jobs:
           # status="disabled" and therefore cannot represent an enabled stock
           # feature. All other stock DTS content remains untouched.
           # ------------------------------------------------------------
-          LITOMAGNUS_DTSI="arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi"
-          test -f "$LITOMAGNUS_DTSI"
+          # The build log from the previous run proves the failing DTB is
+          # litomagnus-cdp.dtb, not litomagnus-mtp.dtb:
+          #   litomagnus-cdp.dtsi:44  Label or path wsa881x_0211 not found
+          #   ... through wsa881x_0214
+          #
+          # The earlier fix handled only the MTP file. Keep that fix, but
+          # apply the same narrowly-scoped cleanup to BOTH stock Magnus
+          # variants because this kernel builds both DTBs. No new WSA node,
+          # header, driver, or feature is added.
+          LITOMAGNUS_MTP_DTSI="arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi"
+          LITOMAGNUS_CDP_DTSI="arch/arm64/boot/dts/vendor/qcom/litomagnus-cdp.dtsi"
+          test -f "$LITOMAGNUS_MTP_DTSI"
+          test -f "$LITOMAGNUS_CDP_DTSI"
 
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          p = Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi")
-          s = p.read_text()
+          files = [
+              Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-mtp.dtsi"),
+              Path("arch/arm64/boot/dts/vendor/qcom/litomagnus-cdp.dtsi"),
+          ]
 
-          # Remove the COMPLETE disabled override blocks, not just the
-          # unresolved label line. Leaving "status = disabled;" and "};"
-          # behind creates invalid DTS syntax (the previous run exposed
-          # exactly that failure at line 45).
           labels = [
               "wsa881x_0211",
               "wsa881x_0212",
@@ -657,41 +666,44 @@ jobs:
               "wsa881x_0214",
           ]
 
-          changed = []
-          for label in labels:
-              pattern = (
-                  r'(?m)^&' + re.escape(label) +
-                  r'\s*\{\n'
-                  r'\s*status\s*=\s*"disabled";\n'
-                  r'\s*\};\n?'
-              )
-              s2, count = re.subn(pattern, "", s, count=1)
-              if count:
-                  changed.append(label)
-                  s = s2
+          for p in files:
+              s = p.read_text()
+              changed = []
 
-          p.write_text(s)
+              # Remove the COMPLETE disabled override blocks, not just the
+              # unresolved label line. Leaving "status = disabled;" and "};"
+              # behind creates invalid DTS syntax.
+              for label in labels:
+                  pattern = (
+                      r'(?m)^&' + re.escape(label) +
+                      r'\s*\{\n'
+                      r'\s*status\s*=\s*"disabled";\n'
+                      r'\s*\};\n?'
+                  )
+                  s2, count = re.subn(pattern, "", s, count=1)
+                  if count:
+                      changed.append(label)
+                      s = s2
 
-          if changed:
-              print("[FIXED] Removed complete unresolved disabled WSA override blocks:")
-              for label in changed:
-                  print("  &" + label)
-          else:
-              print("[PASS] No unresolved disabled WSA override blocks remain.")
+              p.write_text(s)
+
+              if changed:
+                  print(f"[FIXED] {p}: removed complete unresolved disabled WSA override blocks:")
+                  for label in changed:
+                      print("  &" + label)
+              else:
+                  print(f"[PASS] {p}: no unresolved disabled WSA override blocks needed removal.")
           PY
 
-          echo "[PASS] Verify no dead WSA phandle references remain:"
-          if grep -nE '^[[:space:]]*&wsa881x_021[1-4][[:space:]]*$' "$LITOMAGNUS_DTSI"; then
-            echo "[FAIL] Unresolved WSA references still present."
-            exit 1
-          fi
+          echo "[PASS] Verify no dead WSA phandle references remain in either Magnus DTSI:"
+          for f in "$LITOMAGNUS_MTP_DTSI" "$LITOMAGNUS_CDP_DTSI"; do
+            if grep -nE '^[[:space:]]*&wsa881x_021[1-4][[:space:]]*$' "$f"; then
+              echo "[FAIL] Unresolved WSA references still present in $f"
+              exit 1
+            fi
+          done
 
-          echo "[PASS] Verify no dangling disabled-WSA override fragments remain:"
-          if grep -nE '^[[:space:]]*(status[[:space:]]*=[[:space:]]*"disabled";|\};)[[:space:]]*$' "$LITOMAGNUS_DTSI" >/dev/null; then
-            # Do not reject legitimate disabled nodes elsewhere. The actual
-            # DTS parser in the build is the authoritative syntax check.
-            true
-          fi
+          echo "[PASS] Both litomagnus MTP/CDP DTSI files are free of the four dead WSA references."
 
           # ------------------------------------------------------------
           # 6) Stock Lito/Orchid WSA speaker pin-control dependency
