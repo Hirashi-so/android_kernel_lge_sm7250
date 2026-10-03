@@ -2961,6 +2961,19 @@ int tfa_ext_register(dsp_write_reg_t tfa_write_reg,
 EXPORT_SYMBOL(tfa_ext_register);
 #endif
 
+#ifdef QPLATFORM
+/*
+ * Match the TFA dsp_msg callback prototype exactly for CFI.
+ * afe_tfadsp_write() uses void * for its first argument, which is ABI
+ * compatible but has a different C function type.
+ */
+static int tfa_afe_tfadsp_write(struct tfa_device *tfa,
+                                int length, const char *buf)
+{
+    return afe_tfadsp_write(tfa, length, buf);
+}
+#endif
+
 #if defined(TFA_SET_EXT_INTERNALLY)
 #ifdef MPLATFORM
 enum tfa98xx_error ipi_tfadsp_write(struct tfa_device *tfa,
@@ -3224,7 +3237,7 @@ tfa98xx_container_loaded(const struct firmware *cont, void *context)
 /* TEMPORARY, until TFA device is probed before tfa_ext is called */
 #if defined(TFA_SET_EXT_INTERNALLY)
 #ifdef QPLATFORM
-	tfa98xx->tfa->dev_ops.dsp_msg = (dsp_send_message_t)afe_tfadsp_write;
+	tfa98xx->tfa->dev_ops.dsp_msg = tfa_afe_tfadsp_write;
 	tfa98xx->tfa->dev_ops.dsp_msg_read = (dsp_read_message_t)afe_tfadsp_read;
 #endif
 #ifdef MPLATFORM
