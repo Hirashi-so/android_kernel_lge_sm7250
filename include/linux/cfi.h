@@ -41,4 +41,14 @@ static inline void cfi_module_remove(struct module *mod, unsigned long min_addr,
 #endif /* CONFIG_MODULES */
 #endif /* CONFIG_CFI_CLANG */
 
+/*
+ * Preserve CFI jump table addresses for module entry points.
+ */
+#ifdef CONFIG_CFI_CLANG
+#define __CFI_ADDRESSABLE(fn, __attr) \
+	const void *__cfi_jt_ ## fn __visible __attr = (void *)&fn
+#else
+#define __CFI_ADDRESSABLE(fn, __attr)
+#endif
+
 #endif /* _LINUX_CFI_H */

@@ -4239,10 +4239,31 @@ int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
 static void cfi_init(struct module *mod)
 {
 #ifdef CONFIG_CFI_CLANG
+	initcall_t *init;
+#ifdef CONFIG_MODULE_UNLOAD
+	exitcall_t *exit;
+#endif
+
 	rcu_read_lock_sched();
 	mod->cfi_check =
 		(cfi_check_fn)mod_find_symname(mod, CFI_CHECK_FN_NAME);
+	init = (initcall_t *)mod_find_symname(mod,
+					  "__cfi_jt_init_module");
+#ifdef CONFIG_MODULE_UNLOAD
+	exit = (exitcall_t *)mod_find_symname(mod,
+					  "__cfi_jt_cleanup_module");
+#endif
 	rcu_read_unlock_sched();
+
+	/* Use CFI jump table addresses for module entry points. */
+	if (init)
+		mod->init = *init;
+
+#ifdef CONFIG_MODULE_UNLOAD
+	if (exit)
+		mod->exit = *exit;
+#endif
+
 	cfi_module_add(mod, module_addr_min, module_addr_max);
 #endif
 }
