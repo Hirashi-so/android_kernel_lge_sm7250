@@ -1971,12 +1971,11 @@ static int validate_prctl_map(struct prctl_mm_map *prctl_map)
 	}
 
 	/*
-	 * Finally, make sure the caller has the rights to
-	 * change /proc/pid/exe link: only local sys admin should
-	 * be allowed to.
+	 * Changing /proc/pid/exe requires CAP_CHECKPOINT_RESTORE
+	 * or CAP_SYS_ADMIN in the current user namespace.
 	 */
 	if (prctl_map->exe_fd != (u32)-1) {
-		if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+		if (!checkpoint_restore_ns_capable(current_user_ns()))
 			goto out;
 	}
 
