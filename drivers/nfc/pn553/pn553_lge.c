@@ -221,7 +221,17 @@ static ssize_t pn547_dev_read(struct file *filp, char __user *buf,
         do_reading = 0;
 #endif
 
-    if (isFirstPacket == false) {
+    /*
+     * Return EAGAIN instead of waiting when a non-blocking read
+     * is requested and no NFC interrupt is pending.
+     */
+    if ((filp->f_flags & O_NONBLOCK) &&
+        !gpio_get_value(pn547_dev->irq_gpio)) {
+        kfree(tmp);
+        return -EAGAIN;
+    }
+
+    if (isFirstPacket == false && !(filp->f_flags & O_NONBLOCK)) {
 #ifdef READ_IRQ_MODIFY
         ret = wait_event_interruptible_timeout(pn547_dev->read_wq, do_reading|gpio_get_value(pn547_dev->irq_gpio), msecs_to_jiffies(NFC_TIMEOUT_MS)); // NFC-7548
 #else
@@ -240,7 +250,7 @@ static ssize_t pn547_dev_read(struct file *filp, char __user *buf,
         }
     }
 
-    if (isFirstPacket == true)
+    if (isFirstPacket == true && !(filp->f_flags & O_NONBLOCK))
     {
 #ifdef READ_IRQ_MODIFY
         ret = wait_event_interruptible(pn547_dev->read_wq, do_reading|gpio_get_value(pn547_dev->irq_gpio)); // NFC-7548
