@@ -748,6 +748,14 @@ static int touch_sub_init_pm(struct touch_sub_core_data *ts)
 	ts->driver->init_pm(ts->dev);
 	return fb_register_client(&ts->fb_notif);
 }
+
+#elif defined(CONFIG_LGE_TOUCH_USE_PANEL_NOTIFY)
+static int touch_sub_init_pm(struct touch_sub_core_data *ts)
+{
+	TOUCH_TRACE();
+
+	return ts->driver->init_pm(ts->dev);
+}
 #endif
 
 static struct bus_type touch_sub_uevent_subsys = {
